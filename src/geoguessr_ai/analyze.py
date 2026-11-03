@@ -7,6 +7,7 @@ Output under results/analysis/:
   <run>_top_confusions.csv     the 10 most confused (true, predicted) pairs
   <run>_pairs.csv              directed pairs of interest
   report.md                    readable summary
+  per_country_lpft_vs_streetclip.png   dumbbell plot of per-country top-1 for two runs
 
 Usage:
   python -m geoguessr_ai.analyze                       # all runs under results/*/
@@ -18,6 +19,7 @@ intervals; do not interpret differences whose intervals overlap.
 """
 
 import argparse
+import math
 import sys
 from pathlib import Path
 
@@ -112,6 +114,63 @@ def pair_table(cm: pd.DataFrame, groups: list[list[str]]) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["true", "pred", "count", "share_of_true", "lo", "hi"])
 
 
+# Colors from the validated reference palette (categorical slots 1 and 2, light surface).
+INK, INK_2, SURFACE, GRID, LINK = "#0b0b0b", "#52514e", "#fcfcfb", "#e4e3df", "#b4b3ad"
+COLOR_A, COLOR_B = "#2a78d6", "#eb6834"
+
+
+def plot_dumbbell(df_a: pd.DataFrame, df_b: pd.DataFrame, label_a: str, label_b: str,
+                  split: str, out: Path) -> None:
+    """Per-country top-1 of two runs as a dumbbell plot, sorted by the difference (a - b)."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    d = df_a.set_index("country")[["n", "top1"]].rename(columns={"top1": "top1_a"}).join(
+        df_b.set_index("country")[["top1"]].rename(columns={"top1": "top1_b"}), how="inner"
+    )
+    d["diff"] = d["top1_a"] - d["top1_b"]
+    d = d.sort_values("diff", ascending=False)
+    n = int(d["n"].iloc[0])
+    half = 1.96 * math.sqrt(0.25 / n) * 100  # 95% half-width in points at p = 0.5
+
+    y = np.arange(len(d))
+    fig, ax = plt.subplots(figsize=(8, 0.3 * len(d) + 2.2), facecolor=SURFACE)
+    ax.set_facecolor(SURFACE)
+    ax.hlines(y, d["top1_a"], d["top1_b"], color=LINK, linewidth=2, zorder=1)
+    series = (("top1_a", COLOR_A, label_a), ("top1_b", COLOR_B, label_b))
+    for col, color, label in series:
+        ax.scatter(d[col], y, s=64, color=color, edgecolor=SURFACE, linewidth=2,
+                   zorder=3, label=label)
+    # direct labels above the top row, centered over each dot
+    top = d.iloc[0]
+    for col, _, label in series:
+        ax.text(top[col], -0.85, label, ha="center", va="bottom", fontsize=8, color=INK_2)
+
+    ax.set_yticks(y, d.index, fontsize=9, color=INK)
+    ax.set_ylim(len(d) - 0.5, -1.2)
+    lo = math.floor(min(d["top1_a"].min(), d["top1_b"].min()) * 10) / 10
+    ax.set_xlim(max(0.0, lo - 0.02), 1.0)
+    ax.set_xlabel(f"{split} top-1", color=INK_2)
+    ax.tick_params(axis="x", colors=INK_2, labelsize=9)
+    ax.tick_params(axis="y", length=0)
+    ax.xaxis.grid(True, color=GRID, linewidth=1)
+    ax.set_axisbelow(True)
+    for side in ("top", "right", "left"):
+        ax.spines[side].set_visible(False)
+    ax.spines["bottom"].set_color(GRID)
+    fig.legend(*ax.get_legend_handles_labels(), loc="lower center", ncol=2, frameon=False,
+               fontsize=9, labelcolor=INK)
+    fig.suptitle(f"Per-country {split} top-1: {label_a} vs. {label_b}", x=0.01, ha="left",
+                 fontsize=12, color=INK)
+    ax.set_title(f"n = {n} images per country; 95% interval about +-{half:.0f} points. "
+                 "Sorted by difference.", loc="left", fontsize=9, color=INK_2)
+    fig.tight_layout(rect=(0, 0.04, 1, 1))
+    fig.savefig(out, dpi=150, facecolor=SURFACE)
+    plt.close(fig)
+
+
 def run_name(path: Path, results: Path) -> str:
     try:
         return str(path.relative_to(results)).replace("\\", "/")
@@ -195,6 +254,12 @@ def main() -> None:
     ap.add_argument("--focus", nargs="+", default=["FI", "SE"])
     ap.add_argument("--attractor-ratio", type=float, default=1.3,
                     help="threshold on predicted count / true count")
+    ap.add_argument("--plot-runs", nargs=2, default=["clip_vitb16_lpft", "streetclip_zeroshot"],
+                    metavar=("A", "B"),
+                    help="two run directories (under --results) for the dumbbell plot")
+    ap.add_argument("--plot-labels", nargs=2,
+                    default=["Fine-tuned ViT-B/16 (LP-FT)", "StreetCLIP (zero-shot)"])
+    ap.add_argument("--plot-name", default="per_country_lpft_vs_streetclip.png")
     args = ap.parse_args()
 
     out = args.out or args.results / "analysis"
@@ -210,6 +275,12 @@ def main() -> None:
         reports.append(rep)
     pd.concat(frames, ignore_index=True).to_csv(out / "precision_recall.csv", index=False)
     (out / "report.md").write_text("\n".join(reports), encoding="utf-8")
+    csvs = [args.results / r / f"{args.split}_per_country.csv" for r in args.plot_runs]
+    if all(c.exists() for c in csvs):
+        plot_dumbbell(*(pd.read_csv(c) for c in csvs), *args.plot_labels, args.split,
+                      out / args.plot_name)
+    else:
+        print("dumbbell plot skipped: per-country CSVs not found for", args.plot_runs)
     print(f"{len(runs)} runs -> {out}")
     print("\n".join(reports))
 
