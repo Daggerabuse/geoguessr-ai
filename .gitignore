@@ -9,5 +9,6 @@ wheels/
 data/
 CLAUDE.md
 *.ipynb_checkpoints
+models/
 # Virtual environments
 .venv

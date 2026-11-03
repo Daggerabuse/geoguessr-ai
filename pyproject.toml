@@ -6,13 +6,20 @@ readme = "README.md"
 authors = [
     { name = "Mete Cem Bulut", email = "metecem22@gmail.com" }
 ]
-requires-python = ">=3.14"
+requires-python = ">=3.11"
 dependencies = [
-    "huggingface-hub>=2.4.0",
-    "matplotlib>=3.11.2",
-    "pandas>=3.1.0",
+    "huggingface-hub>=0.24",
+    "matplotlib>=3.8",
+    "pandas>=2.2",
     "pandas-stubs~=3.1.0",
-    "pillow>=13.0.0",
+    "pillow>=10",
+    "pycountry>=24.6",
+]
+
+[project.optional-dependencies]
+ml = [
+    "torch",
+    "transformers",
 ]
 
 [project.scripts]
