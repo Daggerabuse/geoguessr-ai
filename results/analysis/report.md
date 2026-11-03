@@ -1,5 +1,116 @@
 # Confusion analizi (test)
 
+## clip_vitb16_lpft
+top-1 (recall ağırlıklı ort.) = 0.708, ülke sayısı = 33
+
+### Çekici ülkeler (tahmin/gerçek ≥ eşik ve precision < recall)
+| country | recall | precision | pred_ratio | attractor_clear |
+|---|---|---|---|---|
+| DK | 0.79 | 0.60 | 1.31 | True |
+| ES | 0.66 | 0.50 | 1.31 | True |
+`attractor_clear=True`: precision aralığı recall aralığından ayrışıyor.
+
+### Odak ülkeler
+| country | recall | recall_lo | recall_hi | precision | pred_ratio |
+|---|---|---|---|---|---|
+| FI | 0.89 | 0.84 | 0.93 | 0.74 | 1.21 |
+| SE | 0.73 | 0.67 | 0.79 | 0.70 | 1.05 |
+
+### En çok karışan 10 çift (gerçek → tahmin)
+| true | pred | count | share_of_true |
+|---|---|---|---|
+| US | CA | 34 | 0.170 |
+| NG | GH | 32 | 0.160 |
+| MA | ES | 29 | 0.145 |
+| IT | ES | 25 | 0.125 |
+| ID | IN | 24 | 0.120 |
+| PT | ES | 24 | 0.120 |
+| BR | AR | 23 | 0.115 |
+| ID | TH | 22 | 0.110 |
+| IE | GB | 22 | 0.110 |
+| DE | PL | 21 | 0.105 |
+
+### İlgilenilen çiftler (gerçek → tahmin; yönlü)
+| true | pred | count | share_of_true | lo | hi |
+|---|---|---|---|---|---|
+| SE | NO | 14 | 0.070 | 0.042 | 0.114 |
+| SE | FI | 19 | 0.095 | 0.062 | 0.144 |
+| SE | DK | 8 | 0.040 | 0.020 | 0.077 |
+| NO | SE | 11 | 0.055 | 0.031 | 0.096 |
+| NO | FI | 5 | 0.025 | 0.011 | 0.057 |
+| NO | DK | 1 | 0.005 | 0.001 | 0.028 |
+| FI | SE | 11 | 0.055 | 0.031 | 0.096 |
+| FI | NO | 6 | 0.030 | 0.014 | 0.064 |
+| FI | DK | 1 | 0.005 | 0.001 | 0.028 |
+| DK | SE | 4 | 0.020 | 0.008 | 0.050 |
+| DK | NO | 0 | 0.000 | 0.000 | 0.019 |
+| DK | FI | 3 | 0.015 | 0.005 | 0.043 |
+| AR | CL | 9 | 0.045 | 0.024 | 0.083 |
+| CL | AR | 5 | 0.025 | 0.011 | 0.057 |
+| ES | PT | 18 | 0.090 | 0.058 | 0.138 |
+| PT | ES | 24 | 0.120 | 0.082 | 0.172 |
+| NG | GH | 32 | 0.160 | 0.116 | 0.217 |
+| GH | NG | 6 | 0.030 | 0.014 | 0.064 |
+| US | CA | 34 | 0.170 | 0.124 | 0.228 |
+| CA | US | 7 | 0.035 | 0.017 | 0.070 |
+
+## clip_vitb16_lpft/probe
+top-1 (recall ağırlıklı ort.) = 0.600, ülke sayısı = 33
+
+### Çekici ülkeler (tahmin/gerçek ≥ eşik ve precision < recall)
+| country | recall | precision | pred_ratio | attractor_clear |
+|---|---|---|---|---|
+| NZ | 0.86 | 0.60 | 1.43 | True |
+| TR | 0.72 | 0.51 | 1.42 | True |
+| ES | 0.54 | 0.40 | 1.33 | True |
+| GH | 0.78 | 0.58 | 1.33 | True |
+| FI | 0.90 | 0.68 | 1.32 | True |
+`attractor_clear=True`: precision aralığı recall aralığından ayrışıyor.
+
+### Odak ülkeler
+| country | recall | recall_lo | recall_hi | precision | pred_ratio |
+|---|---|---|---|---|---|
+| FI | 0.90 | 0.85 | 0.93 | 0.68 | 1.32 |
+| SE | 0.57 | 0.50 | 0.64 | 0.67 | 0.84 |
+
+### En çok karışan 10 çift (gerçek → tahmin)
+| true | pred | count | share_of_true |
+|---|---|---|---|
+| NG | GH | 77 | 0.385 |
+| DE | PL | 43 | 0.215 |
+| MA | TR | 43 | 0.215 |
+| MA | ES | 39 | 0.195 |
+| IT | ES | 38 | 0.190 |
+| SE | FI | 38 | 0.190 |
+| ID | TH | 35 | 0.175 |
+| CL | NZ | 32 | 0.160 |
+| GB | IE | 32 | 0.160 |
+| CO | MX | 30 | 0.150 |
+
+### İlgilenilen çiftler (gerçek → tahmin; yönlü)
+| true | pred | count | share_of_true | lo | hi |
+|---|---|---|---|---|---|
+| SE | NO | 20 | 0.100 | 0.066 | 0.149 |
+| SE | FI | 38 | 0.190 | 0.142 | 0.250 |
+| SE | DK | 15 | 0.075 | 0.046 | 0.120 |
+| NO | SE | 14 | 0.070 | 0.042 | 0.114 |
+| NO | FI | 11 | 0.055 | 0.031 | 0.096 |
+| NO | DK | 0 | 0.000 | 0.000 | 0.019 |
+| FI | SE | 7 | 0.035 | 0.017 | 0.070 |
+| FI | NO | 7 | 0.035 | 0.017 | 0.070 |
+| FI | DK | 0 | 0.000 | 0.000 | 0.019 |
+| DK | SE | 6 | 0.030 | 0.014 | 0.064 |
+| DK | NO | 3 | 0.015 | 0.005 | 0.043 |
+| DK | FI | 4 | 0.020 | 0.008 | 0.050 |
+| AR | CL | 10 | 0.050 | 0.027 | 0.090 |
+| CL | AR | 4 | 0.020 | 0.008 | 0.050 |
+| ES | PT | 20 | 0.100 | 0.066 | 0.149 |
+| PT | ES | 18 | 0.090 | 0.058 | 0.138 |
+| NG | GH | 77 | 0.385 | 0.320 | 0.454 |
+| GH | NG | 14 | 0.070 | 0.042 | 0.114 |
+| US | CA | 24 | 0.120 | 0.082 | 0.172 |
+| CA | US | 14 | 0.070 | 0.042 | 0.114 |
+
 ## clip_vitb16_zeroshot
 top-1 (recall ağırlıklı ort.) = 0.468, ülke sayısı = 33
 
