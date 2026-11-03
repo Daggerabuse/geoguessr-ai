@@ -1,19 +1,20 @@
-"""CLIP zero-shot baseline: ülke adı şablonlarıyla sınıflandırma.
+"""CLIP zero-shot baseline: classification with country-name prompt templates.
 
-Girdi: prep_data.py çıktısı (manifest.csv, classes.json, images/).
-Çıktı: results/clip_zeroshot/<split>_{metrics.json,per_country.csv,confusion.csv,
-       confusion.png,predictions.csv} ve run_config.json.
+Input: prep_data.py output (manifest.csv, classes.json, images/).
+Output: results/clip_zeroshot/<split>_{metrics.json,per_country.csv,confusion.csv,
+        confusion.png,predictions.csv} and run_config.json.
 
-Kullanım (Kaggle):
+Usage (Kaggle):
   python -m geoguessr_ai.baseline_clip --root /kaggle/working/subset
   python -m geoguessr_ai.baseline_clip --root ... --model geolocal/StreetCLIP \\
       --out results/streetclip_zeroshot
 
-CLIPModel/CLIPProcessor ile yüklenen her HF CLIP modeli --model ile çalışır.
-StreetCLIP model kartı bir şablon önermiyor; varsayılan şablon kullanılır.
+Any HF CLIP model loadable with CLIPModel/CLIPProcessor works via --model.
+The StreetCLIP model card recommends no template; the default template is used.
 """
 
 import argparse
+import importlib.metadata
 import json
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -26,7 +27,7 @@ from PIL import Image
 DEFAULT_MODEL = "openai/clip-vit-large-patch14"
 DEFAULT_TEMPLATE = "A street view photo taken in {}."
 
-# pycountry'nin resmi adı şablonda doğal okunmayan ülkeler.
+# Countries whose official pycountry name reads unnaturally in the template.
 NAME_OVERRIDES = {
     "US": "the United States",
     "GB": "the United Kingdom",
@@ -51,11 +52,11 @@ NAME_OVERRIDES = {
 }
 
 
-# ----------------------------------------------------------------- yardımcılar
+# ----------------------------------------------------------------- helpers
 
 
 def country_names(codes: list[str]) -> dict[str, str]:
-    """ISO-2 kod -> şablonda kullanılacak ad. Bulunamazsa kodun kendisi."""
+    """ISO-2 code -> name used in the template; falls back to the code itself."""
     import pycountry
 
     out = {}
@@ -73,12 +74,23 @@ def build_prompts(codes: list[str], template: str) -> list[str]:
     return [template.format(names[c]) for c in codes]
 
 
+def library_versions() -> dict[str, str | None]:
+    """Installed versions of torch/transformers (None if not installed)."""
+    out = {}
+    for name in ("torch", "transformers"):
+        try:
+            out[name] = importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError:
+            out[name] = None
+    return out
+
+
 def normalize(x: np.ndarray) -> np.ndarray:
     return x / np.linalg.norm(x, axis=-1, keepdims=True)
 
 
 def evaluate(logits: np.ndarray, labels: np.ndarray, k: int = 5):
-    """top-1 / top-k doğruluk, tahminler, top-k indeksleri."""
+    """top-1 / top-k hits, predictions, top-k indices."""
     k = min(k, logits.shape[1])
     topk = np.argsort(-logits, axis=1)[:, :k]
     pred = topk[:, 0]
@@ -97,16 +109,16 @@ def confusion(labels: np.ndarray, pred: np.ndarray, n_classes: int) -> np.ndarra
 
 
 def as_embedding(out, kind: str, proj_dim: int):
-    """CLIP çıktısından projeksiyon uygulanmış gömme tensörünü al.
+    """Get the projected embedding tensor from a CLIP output.
 
-    transformers sürümüne göre get_*_features / *ModelWithProjection tensör ya da
-    ModelOutput döndürür. Tensörse aynen; ModelOutput ise `<kind>_embeds`, yoksa
-    `pooler_output` (yeni sürümlerde projeksiyon uygulanmış) kullanılır.
-    last_hidden_state asla kullanılmaz. Son boyut proj_dim değilse (projeksiyon
-    uygulanmamış demektir) hata verir.
+    Depending on the transformers version, get_*_features / *ModelWithProjection
+    return either a tensor or a ModelOutput. A tensor is used as is; for a
+    ModelOutput `<kind>_embeds` is used, otherwise `pooler_output` (projected in
+    newer versions). last_hidden_state is never used. Raises if the last
+    dimension is not proj_dim (meaning the projection was not applied).
     """
     if kind not in ("text", "image"):
-        raise ValueError(f"kind 'text' ya da 'image' olmalı: {kind!r}")
+        raise ValueError(f"kind must be 'text' or 'image': {kind!r}")
     if hasattr(out, "shape"):
         emb = out
     else:
@@ -115,18 +127,18 @@ def as_embedding(out, kind: str, proj_dim: int):
             emb = getattr(out, "pooler_output", None)
         if emb is None:
             raise ValueError(
-                f"{type(out).__name__} içinde {kind}_embeds ya da pooler_output yok"
+                f"{type(out).__name__} has neither {kind}_embeds nor pooler_output"
             )
     if emb.shape[-1] != proj_dim:
         raise ValueError(
-            f"{kind} gömme boyutu {emb.shape[-1]}, beklenen projection_dim={proj_dim}: "
-            "projeksiyon uygulanmamış olabilir"
+            f"{kind} embedding dim is {emb.shape[-1]}, expected projection_dim={proj_dim}: "
+            "the projection may not have been applied"
         )
     return emb
 
 
 class HFClip:
-    """transformers CLIP sarmalayıcısı; torch/transformers tembel import edilir."""
+    """Wrapper around transformers CLIP; torch/transformers are imported lazily."""
 
     def __init__(self, name: str, device: str | None = None):
         import torch
@@ -135,7 +147,7 @@ class HFClip:
         self.torch = torch
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         dtype = torch.float16 if self.device == "cuda" else torch.float32
-        # dtype'ı sonradan ver: transformers sürümleri arasında kwarg adı değişti
+        # pass dtype afterwards: the kwarg name changed across transformers versions
         self.model = CLIPModel.from_pretrained(name).to(self.device, dtype=dtype).eval()
         self.processor = CLIPProcessor.from_pretrained(name)
         self.logit_scale = self.model.logit_scale.exp().item()
@@ -164,9 +176,9 @@ def _open(path: Path):
 
 
 def image_logits(enc, text_emb, paths, batch_size, workers):
-    """Batch'ler halinde görüntü gömmeleri -> logits; okunamayanlar atlanır.
+    """Image embeddings in batches -> logits; unreadable images are skipped.
 
-    Döner: (logits, geçerli_maske)
+    Returns: (logits, valid_mask)
     """
     ok = np.zeros(len(paths), dtype=bool)
     rows = []
@@ -185,7 +197,7 @@ def image_logits(enc, text_emb, paths, batch_size, workers):
     return (np.concatenate(rows) if rows else np.zeros((0, n_cls))), ok
 
 
-# ----------------------------------------------------------------- çalıştırma
+# ----------------------------------------------------------------- run
 
 
 def save_confusion_png(cm: np.ndarray, classes: list[str], path: Path) -> None:
@@ -200,9 +212,9 @@ def save_confusion_png(cm: np.ndarray, classes: list[str], path: Path) -> None:
     im = ax.imshow(norm, cmap="Blues", vmin=0, vmax=1)
     ax.set_xticks(range(len(classes)), classes, rotation=90, fontsize=7)
     ax.set_yticks(range(len(classes)), classes, fontsize=7)
-    ax.set_xlabel("Tahmin")
-    ax.set_ylabel("Gerçek")
-    fig.colorbar(im, ax=ax, fraction=0.046, label="satır oranı")
+    ax.set_xlabel("Predicted")
+    ax.set_ylabel("True")
+    fig.colorbar(im, ax=ax, fraction=0.046, label="row fraction")
     fig.tight_layout()
     fig.savefig(path, dpi=120)
     plt.close(fig)
@@ -217,7 +229,7 @@ def write_split_results(
     classes: list[str],
     n_missing: int = 0,
 ) -> dict:
-    """Bir split'in metrik/dosya çıktıları. baseline_clip ve train aynı biçimi paylaşır."""
+    """Metrics/files for one split. baseline_clip and train share this format."""
     sub = pd.DataFrame({"id": list(ids)})
     hit1, hitk, pred, topk = evaluate(logits, labels)
 
@@ -230,7 +242,7 @@ def write_split_results(
     cm = confusion(labels, pred, len(classes))
     metrics = {
         "split": split,
-        "n": int(len(sub)),
+        "n": len(sub),
         "n_missing": n_missing,
         "top1": float(hit1.mean()) if len(sub) else None,
         "top5": float(hitk.mean()) if len(sub) else None,
@@ -260,7 +272,7 @@ def run_split(enc, text_emb, df, classes, root, split, out, batch_size, workers)
     logits, ok = image_logits(enc, text_emb, paths, batch_size, workers)
     n_missing = int((~ok).sum())
     if n_missing:
-        print(f"UYARI [{split}]: {n_missing} görüntü okunamadı, atlandı")
+        print(f"WARNING [{split}]: {n_missing} images could not be read, skipped")
     sub = sub[ok].reset_index(drop=True)
     return write_split_results(
         out, split, sub["id"], sub["label"].to_numpy(), logits, classes, n_missing
@@ -276,7 +288,7 @@ def run(args: argparse.Namespace, enc=None) -> dict:
         enc = HFClip(args.model)
 
     prompts = build_prompts(classes, args.template)
-    print("Örnek şablonlar:", prompts[:3])
+    print("Example prompts:", prompts[:3])
     text_emb = normalize(enc.encode_texts(prompts))
 
     out = Path(args.out)
@@ -288,6 +300,7 @@ def run(args: argparse.Namespace, enc=None) -> dict:
                 "template": args.template,
                 "seed": args.seed,
                 "device": getattr(enc, "device", "n/a"),
+                "versions": library_versions(),
                 "classes": classes,
                 "prompts": prompts,
             },

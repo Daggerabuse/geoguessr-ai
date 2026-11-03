@@ -1,17 +1,19 @@
-"""CLIP ViT-B/16 fine-tuning: linear probe (LP) ardından tam fine-tuning (FT).
+"""CLIP ViT-B/16 fine-tuning: linear probe (LP) followed by full fine-tuning (FT).
 
-Akış:
-  1. Sınıflandırma kafası ülke adı metin gömmeleriyle başlatılır (zero-shot noktası).
-  2. LP: backbone dondurulur, görüntü özellikleri bir kez çıkarılır, sadece kafa eğitilir.
-  3. FT: tüm model, düşük lr ile eğitilir (AMP fp16). Yatay çevirme YOK.
-  4. En iyi checkpoint (val top-1) models/<run>/best.pt; sonuçlar baseline_clip ile aynı
-     dosya biçiminde results/<run>/ altına (LP sonuçları results/<run>/probe/).
+Flow:
+  1. The classification head is initialised from country-name text embeddings (the
+     zero-shot starting point).
+  2. LP: the backbone is frozen, image features are extracted once, only the head is trained.
+  3. FT: the whole model is trained with a low lr (AMP fp16). NO horizontal flip.
+  4. Best checkpoint (val top-1) goes to models/<run>/best.pt; results are written to
+     results/<run>/ in the same file format as baseline_clip (LP results in
+     results/<run>/probe/).
 
-Test seti yalnızca eğitim bittikten sonra, en iyi checkpoint ile değerlendirilir
-(LP için de val'e göre seçilen kafa ile).
+The test split is evaluated only after training, with the best checkpoint
+(for LP too: the head selected by val).
 
-Kullanım (Kaggle):
-  python -m geoguessr_ai.train --root /kaggle/working/subset --smoke   # önce hızlı kontrol
+Usage (Kaggle):
+  python -m geoguessr_ai.train --root /kaggle/working/subset --smoke   # quick check first
   python -m geoguessr_ai.train --root /kaggle/working/subset [--tta]
 """
 
@@ -32,6 +34,7 @@ from geoguessr_ai.baseline_clip import (
     as_embedding,
     build_prompts,
     evaluate,
+    library_versions,
     write_split_results,
 )
 
@@ -40,13 +43,13 @@ CLIP_MEAN = np.array([0.48145466, 0.4578275, 0.40821073], dtype=np.float32)
 CLIP_STD = np.array([0.26862954, 0.26130258, 0.27577711], dtype=np.float32)
 
 
-# ----------------------------------------------------------------- görüntü dönüşümleri
-# Sadece PIL + numpy (torchvision gerekmez). Yatay/dikey çevirme bilerek YOK:
-# trafiğin aktığı taraf ülke ipucudur.
+# ----------------------------------------------------------------- image transforms
+# PIL + numpy only (no torchvision needed). Horizontal/vertical flips are deliberately
+# absent: the side of the road traffic drives on is a country cue.
 
 
 def to_tensor_array(im: Image.Image) -> np.ndarray:
-    """PIL RGB -> normalize edilmiş float32 CHW."""
+    """PIL RGB -> normalized float32 CHW."""
     x = np.asarray(im, dtype=np.float32) / 255.0
     return ((x - CLIP_MEAN) / CLIP_STD).transpose(2, 0, 1).copy()
 
@@ -58,7 +61,7 @@ def resize_short(im: Image.Image, size: int) -> Image.Image:
 
 
 def eval_views(im: Image.Image, size: int, tta: bool) -> list[np.ndarray]:
-    """Kısa kenar `size` + center crop. tta: uzun eksende sol/orta/sağ (üst/orta/alt)."""
+    """Short side `size` + center crop. tta: left/center/right (top/center/bottom) along the long axis."""
     im = resize_short(im, size)
     w, h = im.size
     if w >= h:
@@ -78,7 +81,7 @@ def train_view(
     erase_p: float = 0.25,
     blur_p: float = 0.1,
 ) -> np.ndarray:
-    """Rastgele kare-ye yakın crop (kısa kenar karesinin ~%49-100'ü) + hafif renk/bulanıklık/silme."""
+    """Random near-square crop (~49-100% of the short-side square) + light color jitter/blur/erasing."""
     w, h = im.size
     c = min(w, h) * rng.uniform(0.7, 1.0)
     r = math.exp(rng.uniform(math.log(0.85), math.log(1.18)))
@@ -86,7 +89,7 @@ def train_view(
     x0, y0 = rng.uniform(0, w - cw), rng.uniform(0, h - ch)
     im = im.resize((size, size), Image.BICUBIC, box=(x0, y0, x0 + cw, y0 + ch))
     if jitter:
-        # hue kaydırması yok: yol çizgisi renkleri (sarı/beyaz) ipucu
+        # no hue shift: road-line colors (yellow/white) are a cue
         for enh, mag in ((ImageEnhance.Brightness, 0.2), (ImageEnhance.Contrast, 0.2),
                          (ImageEnhance.Color, 0.15)):
             im = enh(im).enhance(rng.uniform(1 - mag, 1 + mag))
@@ -98,15 +101,15 @@ def train_view(
         asp = math.exp(rng.uniform(math.log(0.5), math.log(2.0)))
         eh, ew = min(size, int(math.sqrt(area / asp))), min(size, int(math.sqrt(area * asp)))
         ey, ex = int(rng.integers(0, size - eh + 1)), int(rng.integers(0, size - ew + 1))
-        x[:, ey : ey + eh, ex : ex + ew] = 0.0  # normalize uzayında ortalama renk
+        x[:, ey : ey + eh, ex : ex + ew] = 0.0  # mean color in normalized space
     return x
 
 
 class GeoDataset:
-    """manifest satırlarından (id, path, label) görüntü dataset'i; torch'a bağımlı değil.
+    """Image dataset from manifest rows (id, path, label); does not depend on torch.
 
-    train=True: rastgele augmentation, (3,H,W). Aksi: (n_views,3,H,W).
-    Diskte olmayan görüntüler atlanır, sayısı n_missing'de tutulur.
+    train=True: random augmentation, (3,H,W). Otherwise: (n_views,3,H,W).
+    Images missing on disk are skipped; their count is kept in n_missing.
     """
 
     def __init__(self, root: Path, df: pd.DataFrame, size: int, train: bool,
@@ -115,7 +118,7 @@ class GeoDataset:
         ok = np.array([p.exists() for p in paths], dtype=bool)
         self.n_missing = int((~ok).sum())
         if self.n_missing:
-            print(f"UYARI: {self.n_missing} görüntü bulunamadı, atlandı")
+            print(f"WARNING: {self.n_missing} images not found, skipped")
         self.df = df[ok].reset_index(drop=True)
         self.paths = [p for p, k in zip(paths, ok) if k]
         self.labels = self.df["label"].to_numpy()
@@ -138,11 +141,11 @@ class GeoDataset:
         return x, int(self.labels[i])
 
 
-# ----------------------------------------------------------------- program mantığı (torch'suz)
+# ----------------------------------------------------------------- program logic (no torch)
 
 
 def lr_factor(step: int, total: int, warmup: int) -> float:
-    """Doğrusal warmup + cosine azalma (0'a)."""
+    """Linear warmup + cosine decay (to 0)."""
     if warmup > 0 and step < warmup:
         return (step + 1) / warmup
     progress = (step - warmup) / max(1, total - warmup)
@@ -150,13 +153,13 @@ def lr_factor(step: int, total: int, warmup: int) -> float:
 
 
 class EarlyStopper:
-    """metric (yüksek iyi) `patience` epoch iyileşmezse durdurur."""
+    """Stops when the metric (higher is better) does not improve for `patience` epochs."""
 
     def __init__(self, patience: int):
         self.patience, self.best, self.bad = patience, -math.inf, 0
 
     def update(self, metric: float) -> bool:
-        """True dönerse bu epoch en iyi."""
+        """Returns True if this epoch is the best so far."""
         if metric > self.best:
             self.best, self.bad = metric, 0
             return True
@@ -168,7 +171,7 @@ class EarlyStopper:
         return self.bad >= self.patience
 
 
-# ----------------------------------------------------------------- torch kısmı
+# ----------------------------------------------------------------- torch part
 
 
 def set_seed(seed: int) -> None:
@@ -181,7 +184,7 @@ def set_seed(seed: int) -> None:
 
 
 def load_backbone(args, n_classes: int, prompts: list[str]):
-    """(vision_model, img_size, text_emb[C,D]). --smoke: indirme yok, küçük rastgele model."""
+    """(vision_model, img_size, text_emb[C,D]). --smoke: no download, tiny random model."""
     import torch
 
     if args.smoke:
@@ -196,7 +199,11 @@ def load_backbone(args, n_classes: int, prompts: list[str]):
         text = torch.randn(n_classes, cfg.projection_dim, generator=g)
         return vision, cfg.image_size, text
 
-    from transformers import AutoTokenizer, CLIPTextModelWithProjection, CLIPVisionModelWithProjection
+    from transformers import (
+        AutoTokenizer,
+        CLIPTextModelWithProjection,
+        CLIPVisionModelWithProjection,
+    )
 
     vision = CLIPVisionModelWithProjection.from_pretrained(args.model)
     tok = AutoTokenizer.from_pretrained(args.model)
@@ -209,9 +216,9 @@ def load_backbone(args, n_classes: int, prompts: list[str]):
 
 
 def make_model(vision, text_emb, logit_scale: float):
-    """Görüntü kodlayıcı + (ülke x D) kafa; logits = scale * cos(img, W)."""
-    import torch.nn as nn
+    """Image encoder + (countries x D) head; logits = scale * cos(img, W)."""
     import torch.nn.functional as F
+    from torch import nn
 
     class GeoCLIP(nn.Module):
         def __init__(self):
@@ -246,7 +253,7 @@ def make_loader(ds, batch_size, shuffle, workers, seed):
 
 
 def predict_logits(model, ds, batch_size, workers, device, amp, seed=42) -> np.ndarray:
-    """(N, C) logits; TTA varsa görünümlerin logits ortalaması."""
+    """(N, C) logits; with TTA, the mean of the views' logits."""
     import torch
 
     model.eval()
@@ -262,7 +269,7 @@ def predict_logits(model, ds, batch_size, workers, device, amp, seed=42) -> np.n
 
 
 def extract_embeddings(model, ds, batch_size, workers, device, amp):
-    """Dondurulmuş backbone ile (N, D) normalize özellikler (tek görünüm: center crop)."""
+    """(N, D) normalized features from the frozen backbone (single view: center crop)."""
     import torch
 
     model.eval()
@@ -281,7 +288,7 @@ def top1(logits: np.ndarray, labels: np.ndarray) -> float:
 
 
 def train_probe(model, feats, labels, val_feats, val_labels, args, device, history):
-    """Sadece kafayı eğit; epoch 0 = zero-shot başlangıcı. En iyi val kafası geri yüklenir."""
+    """Train only the head; epoch 0 = zero-shot starting point. The best-val head is restored."""
     import torch
     import torch.nn.functional as F
 
@@ -294,7 +301,7 @@ def train_probe(model, feats, labels, val_feats, val_labels, args, device, histo
     best = val_acc()
     best_head = model.head.detach().clone()
     history.append({"phase": "probe", "epoch": 0, "val_top1": best})
-    print(f"[probe] epoch 0 (başlangıç) val_top1={best:.4f}")
+    print(f"[probe] epoch 0 (initial) val_top1={best:.4f}")
     opt = torch.optim.AdamW([model.head], lr=args.probe_lr, weight_decay=0.0)
     gen = torch.Generator().manual_seed(args.seed)
     for ep in range(1, args.probe_epochs + 1):
@@ -314,7 +321,7 @@ def train_probe(model, feats, labels, val_feats, val_labels, args, device, histo
         if acc > best:
             best, best_head = acc, model.head.detach().clone()
     model.head.data.copy_(best_head)
-    print(f"[probe] en iyi val_top1={best:.4f}")
+    print(f"[probe] best val_top1={best:.4f}")
 
 
 def finetune(model, train_ds, val_ds, args, device, amp, ckpt_dir: Path, history, meta):
@@ -356,7 +363,7 @@ def finetune(model, train_ds, val_ds, args, device, amp, ckpt_dir: Path, history
             scale = scaler.get_scale()
             scaler.step(opt)
             scaler.update()
-            if scaler.get_scale() >= scale:  # fp16 taşmasında adım atlanır: scheduler da atlasın
+            if scaler.get_scale() >= scale:  # fp16 overflow skips the optimizer step: skip the scheduler too
                 sched.step()
             tot += loss.item() * len(y)
             correct += (logits.argmax(1) == y).sum().item()
@@ -375,12 +382,12 @@ def finetune(model, train_ds, val_ds, args, device, amp, ckpt_dir: Path, history
         if stopper.update(v):
             torch.save(payload, ckpt_dir / "best.pt")
         if stopper.should_stop:
-            print(f"[ft] erken durdurma (epoch {epoch})")
+            print(f"[ft] early stopping (epoch {epoch})")
             break
     return stopper.best
 
 
-# ----------------------------------------------------------------- çalıştırma
+# ----------------------------------------------------------------- run
 
 
 def run(args: argparse.Namespace) -> dict:
@@ -391,7 +398,7 @@ def run(args: argparse.Namespace) -> dict:
     classes = json.loads((root / "classes.json").read_text())
     df = pd.read_csv(root / "manifest.csv", dtype={"id": str})
     run_name = args.run_name + ("_smoke" if args.smoke else "")
-    if args.smoke:  # küçük/hızlı kontrol
+    if args.smoke:  # small/fast check
         df = df.groupby("split").head(48)
         args.epochs, args.probe_epochs, args.batch_size, args.workers = 2, 2, 8, 0
     out = Path(args.results_dir) / run_name
@@ -416,14 +423,14 @@ def run(args: argparse.Namespace) -> dict:
     meta = {"classes": classes, "model": args.model, "template": args.template, "img_size": size}
     (out / "run_config.json").write_text(json.dumps(
         {**vars(args), "run_name": run_name, "device": str(device), "img_size": size,
-         "head_init": "text_embeddings", "prompts": prompts, "classes": classes,
+         "versions": library_versions(), "head_init": "text_embeddings", "prompts": prompts, "classes": classes,
          "n_missing": {k: v.n_missing for k, v in ds.items()}},
         indent=2, default=str,
     ))
     history: list[dict] = []
 
     # --- LP
-    ev = lambda d: extract_embeddings(model, d, args.batch_size, args.workers, device, amp)  # noqa: E731
+    ev = lambda d: extract_embeddings(model, d, args.batch_size, args.workers, device, amp)
     f_tr, f_va, f_te = ev(ds["train_eval"]), ev(ds["val"]), ev(ds["test"])
     train_probe(model, f_tr, ds["train_eval"].labels, f_va, ds["val"].labels, args, device, history)
     with torch.no_grad():
@@ -437,9 +444,9 @@ def run(args: argparse.Namespace) -> dict:
     # --- FT
     best = finetune(model, ds["train"], ds["val"], args, device, amp, ckpt_dir, history, meta)
     pd.DataFrame(history).to_csv(out / "history.csv", index=False)
-    print(f"en iyi val_top1={best:.4f}")
+    print(f"best val_top1={best:.4f}")
 
-    # --- Son değerlendirme: en iyi checkpoint, test yalnızca burada
+    # --- Final evaluation: best checkpoint; the test split is used only here
     model.load_state_dict(torch.load(ckpt_dir / "best.pt", map_location=device)["state_dict"])
     results = {}
     for name in ("val", "test"):
@@ -472,9 +479,9 @@ def main() -> None:
     ap.add_argument("--logit-scale", type=float, default=100.0)
     ap.add_argument("--patience", type=int, default=3)
     ap.add_argument("--workers", type=int, default=4)
-    ap.add_argument("--tta", action="store_true", help="sol/orta/sağ 3 crop ortalaması (son eval)")
+    ap.add_argument("--tta", action="store_true", help="average of 3 crops: left/center/right (final eval)")
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--smoke", action="store_true", help="indirmesiz küçük rastgele model, hızlı kontrol")
+    ap.add_argument("--smoke", action="store_true", help="tiny random model, no download, quick check")
     run(ap.parse_args())
 
 

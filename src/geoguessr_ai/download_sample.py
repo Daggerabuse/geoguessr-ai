@@ -1,12 +1,12 @@
-"""OSV-5M'den küçük bir örnek indirir (tüm zip'i indirmeden, range isteğiyle).
+"""Download a small OSV-5M sample (range requests, without downloading the whole zip).
 
-Kullanım: uv run python -m geoguessr_ai.download_sample [--n 3000] [--shard 04]
+Usage: uv run python -m geoguessr_ai.download_sample [--n 3000] [--shard 04]
 """
 
 import argparse
-import sys
 import random
 import shutil
+import sys
 import zipfile
 from pathlib import Path
 
@@ -41,7 +41,7 @@ def main() -> None:
         names = [n for n in zf.namelist() if not n.endswith("/")]
         rng = random.Random(SEED)
         picked = rng.sample(names, min(args.n, len(names)))
-        # zip içindeki sırayla oku: range istekleri ardışık olur, çok daha hızlı
+        # read in zip order: range requests become sequential, much faster
         order = {n: i for i, n in enumerate(names)}
         picked.sort(key=order.__getitem__)
         for name in tqdm(picked, desc="extract"):
@@ -54,7 +54,7 @@ def main() -> None:
     ids = [Path(n).stem for n in picked]
     sample = meta.loc[meta.index.intersection(ids)]
     sample.to_csv(DATA / "sample" / "meta.csv")
-    print(f"{len(picked)} görüntü, {len(sample)} meta satırı -> {DATA / 'sample'}")
+    print(f"{len(picked)} images, {len(sample)} metadata rows -> {DATA / 'sample'}")
 
 
 if __name__ == "__main__":

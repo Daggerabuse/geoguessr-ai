@@ -1,20 +1,20 @@
-"""Confusion matrix analizi: ülke bazında recall/precision, en çok karışan çiftler.
+"""Confusion matrix analysis: per-country recall/precision, most confused pairs.
 
-Girdi: results/<run>/<split>_confusion.csv (satır = gerçek, sütun = tahmin);
-baseline_clip ve train aynı biçimi yazar, ikisine de uygulanır.
-Çıktı: results/analysis/ altında
-  precision_recall.csv         tüm koşular, ülke bazında (uzun biçim)
-  <run>_top_confusions.csv     en çok karışan 10 (gerçek, tahmin) çifti
-  <run>_pairs.csv              ilgilenilen yönlü çiftler
-  report.md                    okunabilir özet
+Input: results/<run>/<split>_confusion.csv (row = true, column = predicted);
+baseline_clip and train write the same format, so this works on both.
+Output under results/analysis/:
+  precision_recall.csv         all runs, per country (long format)
+  <run>_top_confusions.csv     the 10 most confused (true, predicted) pairs
+  <run>_pairs.csv              directed pairs of interest
+  report.md                    readable summary
 
-Kullanım:
-  python -m geoguessr_ai.analyze                       # results/*/ içindeki tüm koşular
+Usage:
+  python -m geoguessr_ai.analyze                       # all runs under results/*/
   python -m geoguessr_ai.analyze --runs results/clip_vitb16_lpft results/clip_vitb16_lpft/probe
 
-Belirsizlik: ülke başına n=200 ise bir oran için standart hata ~3.5 puan, %95 aralık
-yaklaşık ±7 puan (p=0.5'te). CSV'lerde Wilson %95 aralığı var; aralıkları çakışan
-farkları yorumlama.
+Uncertainty: with n=200 per country the standard error of a proportion is ~3.5 points
+and the 95% interval roughly +-7 points (at p=0.5). The CSVs contain Wilson 95%
+intervals; do not interpret differences whose intervals overlap.
 """
 
 import argparse
@@ -24,7 +24,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-# Varsayılan ilgilenilen yönlü çiftler: İskandinav dörtlüsü + diğer sık karışanlar.
+# Default directed pairs of interest: the Nordic four + other commonly confused pairs.
 SCANDI = ["SE", "NO", "FI", "DK"]
 PAIR_GROUPS = [
     SCANDI,
@@ -36,7 +36,7 @@ PAIR_GROUPS = [
 
 
 def wilson(k: np.ndarray, n: np.ndarray, z: float = 1.96):
-    """Wilson %95 güven aralığı (alt, üst); n=0 için NaN."""
+    """Wilson 95% confidence interval (lower, upper); NaN for n=0."""
     k, n = np.asarray(k, float), np.asarray(n, float)
     with np.errstate(divide="ignore", invalid="ignore"):
         p = k / n
@@ -50,11 +50,11 @@ def load_confusion(path: Path) -> pd.DataFrame:
     cm = pd.read_csv(path, index_col=0)
     cm.columns = cm.columns.astype(str)
     cm.index = cm.index.astype(str)
-    return cm.loc[:, cm.index]  # sütun sırası = satır sırası
+    return cm.loc[:, cm.index]  # column order = row order
 
 
 def per_country(cm: pd.DataFrame, attractor_ratio: float) -> pd.DataFrame:
-    """recall, precision, tahmin/gerçek oranı ve 'çekici' işareti."""
+    """recall, precision, predicted/true ratio and the 'attractor' flag."""
     m = cm.to_numpy()
     tp = np.diag(m).astype(float)
     n_true, n_pred = m.sum(1), m.sum(0)
@@ -77,15 +77,15 @@ def per_country(cm: pd.DataFrame, attractor_ratio: float) -> pd.DataFrame:
             "pred_ratio": ratio,
         }
     )
-    # çekici: fazla tahmin ediliyor, tahmin edilince çoğunlukla yanlış (precision < recall)
+    # attractor: over-predicted, and mostly wrong when predicted (precision < recall)
     df["attractor"] = (df["pred_ratio"] >= attractor_ratio) & (df["precision"] < df["recall"])
-    # kesin: precision'ın üst sınırı recall'ın alt sınırının altında -> aralıklar çakışmıyor
+    # clear: precision upper bound is below the recall lower bound -> intervals do not overlap
     df["attractor_clear"] = df["attractor"] & (df["precision_hi"] < df["recall_lo"])
     return df
 
 
 def confusions(cm: pd.DataFrame) -> pd.DataFrame:
-    """Köşegen dışı tüm (gerçek, tahmin, sayı, gerçeğin yüzdesi) satırları, azalan sayıya göre."""
+    """All off-diagonal (true, pred, count, share of true) rows, sorted by descending count."""
     rows = []
     n_true = cm.sum(axis=1)
     for a in cm.index:
@@ -142,30 +142,30 @@ def md_table(df: pd.DataFrame, fmt: dict[str, str] | None = None) -> str:
 def build_report(name: str, pc: pd.DataFrame, top: pd.DataFrame, pairs: pd.DataFrame,
                  focus: list[str], k: int) -> str:
     acc = float(np.average(pc["recall"], weights=pc["n_true"]))
-    out = [f"## {name}", f"top-1 (recall ağırlıklı ort.) = {acc:.3f}, ülke sayısı = {len(pc)}", ""]
+    out = [f"## {name}", f"top-1 (recall, weighted mean) = {acc:.3f}, countries = {len(pc)}", ""]
 
     att = pc[pc["attractor"]].sort_values("pred_ratio", ascending=False)
-    out.append("### Çekici ülkeler (tahmin/gerçek ≥ eşik ve precision < recall)")
+    out.append("### Attractor countries (predicted/true >= threshold and precision < recall)")
     if att.empty:
-        out.append("Yok.")
+        out.append("None.")
     else:
         a = att[["country", "recall", "precision", "pred_ratio", "attractor_clear"]]
         out.append(md_table(a, {"recall": ".2f", "precision": ".2f", "pred_ratio": ".2f"}))
-        out.append("`attractor_clear=True`: precision aralığı recall aralığından ayrışıyor.")
+        out.append("`attractor_clear=True`: the precision interval is separated from the recall interval.")
     out.append("")
 
-    out.append("### Odak ülkeler")
+    out.append("### Focus countries")
     f = pc[pc["country"].isin(focus)][
         ["country", "recall", "recall_lo", "recall_hi", "precision", "pred_ratio"]
     ]
     out.append(md_table(f, {c: ".2f" for c in f.columns if c != "country"}))
     out.append("")
 
-    out.append(f"### En çok karışan {k} çift (gerçek → tahmin)")
+    out.append(f"### {k} most confused pairs (true -> predicted)")
     out.append(md_table(top.head(k), {"share_of_true": ".3f"}))
     out.append("")
 
-    out.append("### İlgilenilen çiftler (gerçek → tahmin; yönlü)")
+    out.append("### Pairs of interest (true -> predicted; directed)")
     out.append(md_table(pairs, {"share_of_true": ".3f", "lo": ".3f", "hi": ".3f"}))
     out.append("")
     return "\n".join(out)
@@ -188,29 +188,29 @@ def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--results", type=Path, default=Path("results"))
-    ap.add_argument("--runs", type=Path, nargs="*", help="koşu klasörleri (varsayılan: hepsi)")
+    ap.add_argument("--runs", type=Path, nargs="*", help="run directories (default: all)")
     ap.add_argument("--split", default="test")
-    ap.add_argument("--out", type=Path, default=None, help="varsayılan: <results>/analysis")
+    ap.add_argument("--out", type=Path, default=None, help="default: <results>/analysis")
     ap.add_argument("--top", type=int, default=10)
     ap.add_argument("--focus", nargs="+", default=["FI", "SE"])
     ap.add_argument("--attractor-ratio", type=float, default=1.3,
-                    help="tahmin sayısı / gerçek sayısı eşiği")
+                    help="threshold on predicted count / true count")
     args = ap.parse_args()
 
     out = args.out or args.results / "analysis"
     out.mkdir(parents=True, exist_ok=True)
     runs = args.runs or find_runs(args.results, args.split)
     if not runs:
-        raise SystemExit(f"{args.results} altında {args.split}_confusion.csv bulunamadı")
+        raise SystemExit(f"no {args.split}_confusion.csv found under {args.results}")
 
-    frames, reports = [], [f"# Confusion analizi ({args.split})", ""]
+    frames, reports = [], [f"# Confusion analysis ({args.split})", ""]
     for r in runs:
         pc, rep = analyze_run(r, args.results, args.split, out, args)
         frames.append(pc)
         reports.append(rep)
     pd.concat(frames, ignore_index=True).to_csv(out / "precision_recall.csv", index=False)
     (out / "report.md").write_text("\n".join(reports), encoding="utf-8")
-    print(f"{len(runs)} koşu -> {out}")
+    print(f"{len(runs)} runs -> {out}")
     print("\n".join(reports))
 
 

@@ -1,6 +1,6 @@
-"""Keşif: ülke dağılımı, görüntü boyutları, rastgele örnekler.
+"""Exploration: country distribution, image sizes, random samples.
 
-Kullanım: uv run python -m geoguessr_ai.explore
+Usage: uv run python -m geoguessr_ai.explore
 """
 
 import sys
@@ -20,25 +20,25 @@ DATA = Path("data")
 
 def show_counts(title: str, s: pd.Series, k: int = 15) -> None:
     vc = s.value_counts()
-    print(f"\n== {title}: {len(vc)} ülke, {len(s)} satır ==")
-    print("En çok:\n", vc.head(k).to_string())
-    print("En az:\n", vc.tail(k).to_string())
-    print("Medyan ülke başına:", vc.median())
+    print(f"\n== {title}: {len(vc)} countries, {len(s)} rows ==")
+    print("Most:\n", vc.head(k).to_string())
+    print("Fewest:\n", vc.tail(k).to_string())
+    print("Median per country:", vc.median())
 
 
 def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8")
     full = pd.read_csv(DATA / "raw" / "test.csv", dtype={"id": str})
-    print("Sütunlar:", list(full.columns))
-    show_counts("test.csv (tüm test)", full["country"])
+    print("Columns:", list(full.columns))
+    show_counts("test.csv (full test set)", full["country"])
 
     sample = pd.read_csv(DATA / "sample" / "meta.csv", dtype={"id": str})
-    show_counts("örnek", sample["country"])
+    show_counts("sample", sample["country"])
 
     img_dir = DATA / "sample" / "images"
     files = {p.stem: p for p in img_dir.iterdir()}
     sizes = Counter(Image.open(p).size for p in files.values())
-    print("\n== Görüntü boyutları (w, h) ==")
+    print("\n== Image sizes (w, h) ==")
     for sz, c in sizes.most_common(10):
         print(sz, c)
 
@@ -52,7 +52,7 @@ def main() -> None:
     out.mkdir(exist_ok=True)
     fig.tight_layout()
     fig.savefig(out / "samples.png", dpi=80)
-    print("\nÖrnek grid:", out / "samples.png")
+    print("\nSample grid:", out / "samples.png")
 
 
 if __name__ == "__main__":

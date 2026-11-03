@@ -1,17 +1,17 @@
-"""Veri hazırlama: ülke seçimi, sequence sınırı, train/val/test bölme, indirme.
+"""Data preparation: country selection, sequence cap, train/val/test split, download.
 
-Kaggle/Colab'da çalıştırmak için tasarlandı (train.csv 2.9 GB, görüntüler zip shard'larında).
-Yerelde yalnızca küçük örnekle (data/sample) test edilir; bkz. --local-zips.
+Designed to run on Kaggle/Colab (train.csv is 2.9 GB, images live in zip shards).
+Locally it is only tested on a small sample (data/sample); see --local-zips.
 
-Adımlar:
-  1. (--stats-only) ülke dağılımını yazdır ve çık.
-  2. Ülkeleri filtrele; sequence başına en çok --max-per-seq kare tut.
-  3. train.csv -> train + val: bölme sequence bazlı (aynı sequence iki tarafa düşmez).
-     test: resmi test.csv (ülke başına --test-per-country).
-  4. manifest.csv + classes.json yaz.
-  5. Görüntüleri shard zip'lerinden, sadece gerekenleri (range isteğiyle) çıkar.
+Steps:
+  1. (--stats-only) print the country distribution and exit.
+  2. Filter countries; keep at most --max-per-seq frames per sequence.
+  3. train.csv -> train + val: split by sequence (a sequence never lands on both sides).
+     test: the official test.csv (--test-per-country per country).
+  4. Write manifest.csv + classes.json.
+  5. Extract only the needed images from the shard zips (via range requests).
 
-Kullanım (Kaggle):
+Usage (Kaggle):
   python -m geoguessr_ai.prep_data --stats-only
   python -m geoguessr_ai.prep_data --out /kaggle/working/subset
 """
@@ -32,13 +32,15 @@ REPO = "osv5m/osv5m"
 N_SHARDS = {"train": 98, "test": 5}
 COLS = ["id", "country", "sequence", "latitude", "longitude"]
 
-# Başlangıç önerisi (kıta/kültür çeşitliliği); --countries ile değiştirilir.
-DEFAULT_COUNTRIES = (
-    "SE NO FI DK GB IE ES PT DE AT FR IT PL RU TR US CA MX BR AR CL CO JP TW TH ID IN AU NZ ZA MA NG GH"
-).split()
+# Default selection (continental/cultural diversity); override with --countries.
+DEFAULT_COUNTRIES = [
+    "SE", "NO", "FI", "DK", "GB", "IE", "ES", "PT", "DE", "AT", "FR", "IT", "PL", "RU",
+    "TR", "US", "CA", "MX", "BR", "AR", "CL", "CO", "JP", "TW", "TH", "ID", "IN", "AU",
+    "NZ", "ZA", "MA", "NG", "GH",
+]
 
 
-# ----------------------------------------------------------------- seçim / bölme
+# ----------------------------------------------------------------- selection / split
 
 
 def read_meta(path: Path) -> pd.DataFrame:
@@ -46,7 +48,7 @@ def read_meta(path: Path) -> pd.DataFrame:
 
 
 def cap_per_sequence(df: pd.DataFrame, k: int, seed: int) -> pd.DataFrame:
-    """Her sequence'ten en çok k kare (rastgele, seed'li)."""
+    """Keep at most k frames per sequence (random, seeded)."""
     df = df.sample(frac=1.0, random_state=seed)
     return df[df.groupby("sequence").cumcount() < k]
 
@@ -54,7 +56,7 @@ def cap_per_sequence(df: pd.DataFrame, k: int, seed: int) -> pd.DataFrame:
 def split_train_val(
     df: pd.DataFrame, train_n: int, val_n: int, seed: int
 ) -> pd.DataFrame:
-    """Ülke başına sequence bazlı val/train ayrımı. Dönen df'de 'split' sütunu var."""
+    """Per-country val/train split by sequence. The returned df has a 'split' column."""
     out = []
     for country, g in df.groupby("country"):
         seqs = g["sequence"].drop_duplicates().sample(frac=1.0, random_state=seed)
@@ -62,7 +64,7 @@ def split_train_val(
         g = g.assign(_r=g["sequence"].map(rank)).sort_values("_r")
         counts = g.groupby("_r", sort=True).size()
         cum = counts.cumsum()
-        # val: ilk sequence'lerden, val_n'e ulaşana dek; kalanı train havuzu
+        # val: take sequences in order until val_n is reached; the rest is the train pool
         n_val_seq = int((cum.shift(fill_value=0) < val_n).sum())
         val_seqs = set(counts.index[:n_val_seq])
         is_val = g["_r"].isin(val_seqs)
@@ -99,11 +101,11 @@ def build_manifest(args: argparse.Namespace, train_csv: Path, test_csv: Path):
     return m, classes
 
 
-# ----------------------------------------------------------------- indirme
+# ----------------------------------------------------------------- download
 
 
 def make_opener(local_zips: Path | None):
-    """(source, shard_no) -> dosya benzeri nesne. Uzak: HF range istekleri."""
+    """(source, shard_no) -> file-like object. Remote: HF range requests."""
     if local_zips is not None:
         return lambda src, i: open(local_zips / src / f"{i:02d}.zip", "rb")
     from huggingface_hub import HfFileSystem
@@ -115,7 +117,7 @@ def make_opener(local_zips: Path | None):
 
 
 def index_shard(opener, src: str, i: int) -> dict[str, tuple[int, str]]:
-    """id -> (shard, zip içi ad). Sadece merkezi dizin okunur."""
+    """id -> (shard, name inside the zip). Only the central directory is read."""
     with opener(src, i) as f, zipfile.ZipFile(f) as zf:
         return {
             Path(n).stem: (i, n) for n in zf.namelist() if not n.endswith("/")
@@ -147,7 +149,7 @@ def save_image(data: bytes, dst: Path, resize: int) -> None:
 
 
 def extract_shard(opener, src, shard, items, out: Path, resize: int) -> int:
-    """items: [(id, zip_name)]; zip içi sırayla (ardışık range) çıkar."""
+    """items: [(id, zip_name)]; extract in zip order (sequential ranges)."""
     n = 0
     with opener(src, shard) as f, zipfile.ZipFile(f) as zf:
         order = {info.filename: j for j, info in enumerate(zf.infolist())}
@@ -169,7 +171,7 @@ def download(m: pd.DataFrame, out: Path, opener, workers: int, resize: int) -> N
         idx = build_index(opener, src, out / f"index_{src}.json", workers)
         missing = ids - idx.keys()
         if missing:
-            print(f"UYARI: {src} içinde bulunamayan {len(missing)} id atlanıyor")
+            print(f"WARNING: skipping {len(missing)} ids not found in {src}")
         by_shard: dict[int, list] = {}
         for id_ in ids - missing:
             shard, name = idx[id_]
@@ -205,12 +207,12 @@ def main() -> None:
     ap.add_argument("--val-per-country", type=int, default=100)
     ap.add_argument("--test-per-country", type=int, default=100)
     ap.add_argument("--max-per-seq", type=int, default=3)
-    ap.add_argument("--resize", type=int, default=0, help="kısa kenar px; 0 = orijinal")
+    ap.add_argument("--resize", type=int, default=0, help="short side in px; 0 = original")
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--stats-only", action="store_true")
-    ap.add_argument("--no-download", action="store_true", help="sadece manifest")
-    ap.add_argument("--local-zips", type=Path, help="DIR/{train,test}/NN.zip (test için)")
+    ap.add_argument("--no-download", action="store_true", help="manifest only")
+    ap.add_argument("--local-zips", type=Path, help="DIR/{train,test}/NN.zip (for testing)")
     args = ap.parse_args()
 
     args.out.mkdir(parents=True, exist_ok=True)
@@ -223,7 +225,7 @@ def main() -> None:
         stats = pd.concat([vc.rename("n_images"), seq], axis=1)
         stats.to_csv(args.out / "country_counts.csv")
         print(stats.head(40).to_string())
-        print(f"\n{len(stats)} ülke, {len(df)} görüntü -> {args.out / 'country_counts.csv'}")
+        print(f"\n{len(stats)} countries, {len(df)} images -> {args.out / 'country_counts.csv'}")
         return
 
     test_csv = get_csv("test.csv", args.test_csv, args.out)
@@ -235,7 +237,7 @@ def main() -> None:
     if args.no_download:
         return
     download(m, args.out, make_opener(args.local_zips), args.workers, args.resize)
-    print("tamam:", args.out)
+    print("done:", args.out)
 
 
 if __name__ == "__main__":
