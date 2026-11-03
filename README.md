@@ -4,8 +4,12 @@ Predicting the country of street-level photos with CLIP and fine-tuning. The tas
 country classification on a subset of [OpenStreetView-5M](https://huggingface.co/datasets/osv5m/osv5m),
 comparing zero-shot CLIP, a linear probe and full fine-tuning (LP-FT).
 
-Main result: CLIP ViT-B/16 with LP-FT reaches 0.708 top-1 on the test split, 24.0 points above the
-zero-shot accuracy of the same backbone, and on par with StreetCLIP zero-shot (0.708; ViT-L/14, 336 px).
+Main result: CLIP ViT-B/16 with LP-FT reaches 0.708 top-1 on the test split with a single center crop,
+24.0 points above the zero-shot accuracy of the same backbone, and on par with StreetCLIP zero-shot
+(0.708; ViT-L/14, 336 px). Test-time augmentation (TTA, average over 3 crops) was adopted because it
+improved the val split (0.787 to 0.808); with it the model reaches 0.732 top-1 on the test split, 2.4 points
+above StreetCLIP zero-shot. That comparison is not fully fair, because StreetCLIP was evaluated without
+TTA, and StreetCLIP stays ahead on top-5 (0.958 vs. 0.935).
 
 ## Why
 
@@ -23,10 +27,17 @@ is about 0.03 top-1. All numbers are read from `results/*/{test,val}_metrics.jso
 | StreetCLIP, zero-shot (ViT-L/14, 336 px) | 0.708 | 0.958 | 0.723 |
 | CLIP ViT-B/16, linear probe | 0.600 | 0.900 | 0.708 |
 | CLIP ViT-B/16, LP-FT (fine-tuned) | 0.708 | 0.925 | 0.787 |
+| CLIP ViT-B/16, LP-FT + TTA (3 crops) | 0.732 | 0.935 | 0.808 |
 
 Gain from zero-shot to LP-FT on the same backbone: 24.0 points (test top-1). LP-FT versus
 StreetCLIP zero-shot: 0.1 points, which is well inside the noise of a single run, so the two are
 treated as on par.
+
+TTA (average over the left, center and right crops) was chosen based on the val split: for the same
+checkpoint, evaluated with `--eval-only --tta` and no retraining, val top-1 went from 0.787 to 0.808.
+On test, top-1 is 0.732 with TTA versus 0.708 without. The TTA model is 2.4 points ahead of StreetCLIP
+zero-shot in test top-1 but behind it in top-5 (0.935 vs. 0.958). StreetCLIP was not evaluated with TTA,
+so this comparison is not fully fair.
 
 ## Findings
 
@@ -36,15 +47,20 @@ so only differences larger than 10 points are discussed below.
 
 - **Where the gain comes from.** On the same ViT-B/16 backbone, the linear probe adds 13.2 points
   over zero-shot and full fine-tuning adds another 10.8 points on top of the probe (test top-1).
+- **Test-time augmentation.** Adopted because of the val split, not the test split. For the same checkpoint,
+  test top-1 is 0.732 with TTA versus 0.708 without. It changes the confusion picture only slightly:
+  SE to FI is 20 (19 without TTA), CA to US 7 (7), NG to GH 32 (32),
+  US to CA 32 (34); the attractor countries are ES, TR (DK, ES without TTA).
+  The Nordic, Canada/US, unsolved-confusion and attractor counts below are for LP-FT without TTA.
 - **Nordic confusion.** Swedish images predicted as Finland (SE to FI, out of 200 per country):
   115 for B/16 zero-shot, 38 after the linear probe, 19 after LP-FT
   (119 for L/14 zero-shot, 23 for StreetCLIP). For StreetCLIP the dominant direction is
   the reverse: FI to SE is 64, versus 11 for LP-FT.
 - **Canada vs. United States.** CA to US: 38 for B/16 zero-shot, 14 after the probe,
   7 after LP-FT (150 for L/14 zero-shot, 37 for StreetCLIP).
-- **Per country, LP-FT vs. StreetCLIP (test top-1, differences > 10 points).**
-  - Fine-tuned model better (6 countries): GH (87.0% vs 42.5%, 44.5 points), FI (89.0% vs 57.5%, 31.5 points), TW (72.5% vs 45.5%, 27.0 points), PL (66.5% vs 42.5%, 24.0 points), DK (79.0% vs 57.0%, 22.0 points), ZA (82.0% vs 69.5%, 12.5 points).
-  - Fine-tuned model worse (7 countries): US (67.0% vs 91.0%, 24.0 points), ID (61.0% vs 84.0%, 23.0 points), BR (60.0% vs 81.5%, 21.5 points), IT (49.0% vs 69.0%, 20.0 points), NG (65.5% vs 85.0%, 19.5 points), CL (51.5% vs 65.0%, 13.5 points), RU (63.5% vs 77.0%, 13.5 points).
+- **Per country, LP-FT with TTA vs. StreetCLIP (test top-1, differences > 10 points).**
+  - Fine-tuned model better (7 countries): GH (87.0% vs 42.5%, 44.5 points), FI (91.5% vs 57.5%, 34.0 points), TW (73.5% vs 45.5%, 28.0 points), PL (70.0% vs 42.5%, 27.5 points), DK (82.0% vs 57.0%, 25.0 points), ZA (84.5% vs 69.5%, 15.0 points), TH (90.5% vs 76.5%, 14.0 points).
+  - Fine-tuned model worse (7 countries): US (69.0% vs 91.0%, 22.0 points), ID (62.5% vs 84.0%, 21.5 points), IT (48.5% vs 69.0%, 20.5 points), NG (66.0% vs 85.0%, 19.0 points), BR (66.0% vs 81.5%, 15.5 points), CL (54.5% vs 65.0%, 10.5 points), JP (83.5% vs 93.5%, 10.0 points).
   - All other countries differ by 10 points or less, which is within the noise level here.
 - **Confusions that were not solved, only changed direction.** GH to NG fell from 108 to 6
   while NG to GH is 32 after LP-FT (it was 24 for B/16 zero-shot). US to CA is
@@ -56,10 +72,10 @@ so only differences larger than 10 points are discussed below.
 
 ### Figures
 
-Per-country test top-1 of the fine-tuned ViT-B/16 (LP-FT) and StreetCLIP zero-shot, sorted by the
+Per-country test top-1 of the fine-tuned ViT-B/16 (LP-FT, with TTA) and StreetCLIP zero-shot, sorted by the
 difference between them. Differences smaller than about 7 points are within the 95% interval.
 
-![Per-country test top-1: LP-FT vs. StreetCLIP](results/analysis/per_country_lpft_vs_streetclip.png)
+![Per-country test top-1: LP-FT with TTA vs. StreetCLIP](results/analysis/per_country_lpft_vs_streetclip.png)
 
 Test confusion matrices of the same backbone before and after fine-tuning (rows are the true
 country, columns the predicted one, each row normalized):
@@ -77,7 +93,8 @@ Left: CLIP ViT-B/16 zero-shot. Right: CLIP ViT-B/16 LP-FT.
 - The 33 countries do not represent the world, and the numbers are not comparable to published
   OSV-5M benchmark results (different country set and metrics).
 - StreetCLIP is a larger model (ViT-L/14) at a higher resolution (336 px) than the fine-tuned ViT-B/16,
-  and it is evaluated zero-shot, while the fine-tuned model was trained on this country set.
+  and it is evaluated zero-shot (and without TTA), while the fine-tuned model was trained on this country set.
+- TTA was selected on the val split, which is optimistic (see below); the test gain is a single measurement.
 - Val is split from the same pool as train (by sequence), so it is optimistic: the val-test gap is
   7.8 points for LP-FT, versus 1.5 for StreetCLIP and 1.6 for B/16 zero-shot. Compare models on test.
 - Over-fitting: in the last of 10 epochs, train top-1 is 0.968 versus 0.787 on val. The
@@ -174,7 +191,7 @@ Evaluation: short side 224 + center crop; `--tta` averages left/center/right cro
 ## Future work
 
 - Split val by creator (not only by sequence) to reduce the val-test gap.
-- Evaluate with test-time augmentation (`--tta`).
+- Evaluate StreetCLIP with TTA, for an equal comparison.
 - Linear probe on StreetCLIP.
 - More images per country.
 - A demo on Hugging Face Spaces.

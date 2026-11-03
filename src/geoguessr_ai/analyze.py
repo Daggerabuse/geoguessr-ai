@@ -254,11 +254,11 @@ def main() -> None:
     ap.add_argument("--focus", nargs="+", default=["FI", "SE"])
     ap.add_argument("--attractor-ratio", type=float, default=1.3,
                     help="threshold on predicted count / true count")
-    ap.add_argument("--plot-runs", nargs=2, default=["clip_vitb16_lpft", "streetclip_zeroshot"],
+    ap.add_argument("--plot-runs", nargs=2, default=["clip_vitb16_lpft_tta", "streetclip_zeroshot"],
                     metavar=("A", "B"),
                     help="two run directories (under --results) for the dumbbell plot")
     ap.add_argument("--plot-labels", nargs=2,
-                    default=["Fine-tuned ViT-B/16 (LP-FT)", "StreetCLIP (zero-shot)"])
+                    default=["Fine-tuned ViT-B/16 (LP-FT, TTA)", "StreetCLIP (zero-shot)"])
     ap.add_argument("--plot-name", default="per_country_lpft_vs_streetclip.png")
     args = ap.parse_args()
 

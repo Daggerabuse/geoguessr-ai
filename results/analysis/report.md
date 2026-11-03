@@ -111,6 +111,60 @@ top-1 (recall, weighted mean) = 0.600, countries = 33
 | US | CA | 24 | 0.120 | 0.082 | 0.172 |
 | CA | US | 14 | 0.070 | 0.042 | 0.114 |
 
+## clip_vitb16_lpft_tta
+top-1 (recall, weighted mean) = 0.732, countries = 33
+
+### Attractor countries (predicted/true >= threshold and precision < recall)
+| country | recall | precision | pred_ratio | attractor_clear |
+|---|---|---|---|---|
+| ES | 0.69 | 0.52 | 1.32 | True |
+| TR | 0.84 | 0.65 | 1.31 | True |
+`attractor_clear=True`: the precision interval is separated from the recall interval.
+
+### Focus countries
+| country | recall | recall_lo | recall_hi | precision | pred_ratio |
+|---|---|---|---|---|---|
+| FI | 0.92 | 0.87 | 0.95 | 0.78 | 1.17 |
+| SE | 0.73 | 0.66 | 0.79 | 0.70 | 1.04 |
+
+### 10 most confused pairs (true -> predicted)
+| true | pred | count | share_of_true |
+|---|---|---|---|
+| NG | GH | 32 | 0.160 |
+| US | CA | 32 | 0.160 |
+| ID | TH | 30 | 0.150 |
+| IT | ES | 27 | 0.135 |
+| MA | ES | 27 | 0.135 |
+| BR | AR | 23 | 0.115 |
+| PT | ES | 23 | 0.115 |
+| DE | AT | 20 | 0.100 |
+| ID | IN | 20 | 0.100 |
+| PL | DE | 20 | 0.100 |
+
+### Pairs of interest (true -> predicted; directed)
+| true | pred | count | share_of_true | lo | hi |
+|---|---|---|---|---|---|
+| SE | NO | 14 | 0.070 | 0.042 | 0.114 |
+| SE | FI | 20 | 0.100 | 0.066 | 0.149 |
+| SE | DK | 9 | 0.045 | 0.024 | 0.083 |
+| NO | SE | 14 | 0.070 | 0.042 | 0.114 |
+| NO | FI | 4 | 0.020 | 0.008 | 0.050 |
+| NO | DK | 1 | 0.005 | 0.001 | 0.028 |
+| FI | SE | 9 | 0.045 | 0.024 | 0.083 |
+| FI | NO | 5 | 0.025 | 0.011 | 0.057 |
+| FI | DK | 0 | 0.000 | 0.000 | 0.019 |
+| DK | SE | 4 | 0.020 | 0.008 | 0.050 |
+| DK | NO | 0 | 0.000 | 0.000 | 0.019 |
+| DK | FI | 1 | 0.005 | 0.001 | 0.028 |
+| AR | CL | 10 | 0.050 | 0.027 | 0.090 |
+| CL | AR | 5 | 0.025 | 0.011 | 0.057 |
+| ES | PT | 14 | 0.070 | 0.042 | 0.114 |
+| PT | ES | 23 | 0.115 | 0.078 | 0.167 |
+| NG | GH | 32 | 0.160 | 0.116 | 0.217 |
+| GH | NG | 5 | 0.025 | 0.011 | 0.057 |
+| US | CA | 32 | 0.160 | 0.116 | 0.217 |
+| CA | US | 7 | 0.035 | 0.017 | 0.070 |
+
 ## clip_vitb16_zeroshot
 top-1 (recall, weighted mean) = 0.468, countries = 33
 
