@@ -29,6 +29,7 @@ from PIL import Image, ImageEnhance, ImageFilter
 
 from geoguessr_ai.baseline_clip import (
     DEFAULT_TEMPLATE,
+    as_embedding,
     build_prompts,
     evaluate,
     write_split_results,
@@ -202,7 +203,7 @@ def load_backbone(args, n_classes: int, prompts: list[str]):
     text_model = CLIPTextModelWithProjection.from_pretrained(args.model).eval()
     with torch.no_grad():
         t = tok(prompts, padding=True, return_tensors="pt")
-        text = text_model(**t).text_embeds.float()
+        text = as_embedding(text_model(**t), "text", text_model.config.projection_dim).float()
     del text_model
     return vision, vision.config.image_size, text
 
@@ -216,11 +217,13 @@ def make_model(vision, text_emb, logit_scale: float):
         def __init__(self):
             super().__init__()
             self.vision = vision
+            self.proj_dim = vision.config.projection_dim
             self.head = nn.Parameter(text_emb.clone().float())
             self.scale = logit_scale
 
         def embed(self, px):
-            return F.normalize(self.vision(pixel_values=px).image_embeds.float(), dim=-1)
+            out = as_embedding(self.vision(pixel_values=px), "image", self.proj_dim)
+            return F.normalize(out.float(), dim=-1)
 
         def logits_from_embed(self, e):
             return self.scale * e @ F.normalize(self.head.float(), dim=-1).T
@@ -305,7 +308,7 @@ def train_probe(model, feats, labels, val_feats, val_labels, args, device, histo
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
-            tot += float(loss) * len(idx)
+            tot += loss.item() * len(idx)
         acc = val_acc()
         history.append({"phase": "probe", "epoch": ep, "train_loss": tot / len(perm), "val_top1": acc})
         if acc > best:
@@ -350,11 +353,13 @@ def finetune(model, train_ds, val_ds, args, device, amp, ckpt_dir: Path, history
             scaler.scale(loss).backward()
             scaler.unscale_(opt)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            scale = scaler.get_scale()
             scaler.step(opt)
             scaler.update()
-            sched.step()
-            tot += float(loss) * len(y)
-            correct += int((logits.argmax(1) == y).sum())
+            if scaler.get_scale() >= scale:  # fp16 taşmasında adım atlanır: scheduler da atlasın
+                sched.step()
+            tot += loss.item() * len(y)
+            correct += (logits.argmax(1) == y).sum().item()
             n += len(y)
         val_logits = predict_logits(model, val_ds, args.batch_size, args.workers, device, amp)
         v = top1(val_logits, val_ds.labels)

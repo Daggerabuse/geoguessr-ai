@@ -96,6 +96,35 @@ def confusion(labels: np.ndarray, pred: np.ndarray, n_classes: int) -> np.ndarra
 # ----------------------------------------------------------------- model
 
 
+def as_embedding(out, kind: str, proj_dim: int):
+    """CLIP çıktısından projeksiyon uygulanmış gömme tensörünü al.
+
+    transformers sürümüne göre get_*_features / *ModelWithProjection tensör ya da
+    ModelOutput döndürür. Tensörse aynen; ModelOutput ise `<kind>_embeds`, yoksa
+    `pooler_output` (yeni sürümlerde projeksiyon uygulanmış) kullanılır.
+    last_hidden_state asla kullanılmaz. Son boyut proj_dim değilse (projeksiyon
+    uygulanmamış demektir) hata verir.
+    """
+    if kind not in ("text", "image"):
+        raise ValueError(f"kind 'text' ya da 'image' olmalı: {kind!r}")
+    if hasattr(out, "shape"):
+        emb = out
+    else:
+        emb = getattr(out, f"{kind}_embeds", None)
+        if emb is None:
+            emb = getattr(out, "pooler_output", None)
+        if emb is None:
+            raise ValueError(
+                f"{type(out).__name__} içinde {kind}_embeds ya da pooler_output yok"
+            )
+    if emb.shape[-1] != proj_dim:
+        raise ValueError(
+            f"{kind} gömme boyutu {emb.shape[-1]}, beklenen projection_dim={proj_dim}: "
+            "projeksiyon uygulanmamış olabilir"
+        )
+    return emb
+
+
 class HFClip:
     """transformers CLIP sarmalayıcısı; torch/transformers tembel import edilir."""
 
@@ -109,18 +138,21 @@ class HFClip:
         # dtype'ı sonradan ver: transformers sürümleri arasında kwarg adı değişti
         self.model = CLIPModel.from_pretrained(name).to(self.device, dtype=dtype).eval()
         self.processor = CLIPProcessor.from_pretrained(name)
-        self.logit_scale = float(self.model.logit_scale.exp())
+        self.logit_scale = self.model.logit_scale.exp().item()
+        self.proj_dim = self.model.config.projection_dim
 
     def encode_texts(self, texts: list[str]) -> np.ndarray:
         with self.torch.no_grad():
             t = self.processor(text=texts, return_tensors="pt", padding=True).to(self.device)
-            return self.model.get_text_features(**t).float().cpu().numpy()
+            out = as_embedding(self.model.get_text_features(**t), "text", self.proj_dim)
+            return out.float().cpu().numpy()
 
     def encode_images(self, images: list[Image.Image]) -> np.ndarray:
         with self.torch.no_grad():
             px = self.processor(images=images, return_tensors="pt")["pixel_values"]
             px = px.to(self.device, dtype=self.model.dtype)
-            return self.model.get_image_features(pixel_values=px).float().cpu().numpy()
+            out = as_embedding(self.model.get_image_features(pixel_values=px), "image", self.proj_dim)
+            return out.float().cpu().numpy()
 
 
 def _open(path: Path):
