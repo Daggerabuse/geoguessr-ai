@@ -13,7 +13,7 @@ Adımlar:
 
 Kullanım (Kaggle):
   python -m geoguessr_ai.prep_data --stats-only
-  python -m geoguessr_ai.prep_data --out /kaggle/working/osv5m_subset
+  python -m geoguessr_ai.prep_data --out /kaggle/working/subset
 """
 
 import argparse
@@ -34,7 +34,7 @@ COLS = ["id", "country", "sequence", "latitude", "longitude"]
 
 # Başlangıç önerisi (kıta/kültür çeşitliliği); --countries ile değiştirilir.
 DEFAULT_COUNTRIES = (
-    "US CA MX BR AR CL PE GB FR DE ES IT PL SE NO FI RU TR IN CN JP TH ID AU NZ ZA NG MA TZ KZ"
+    "SE NO FI DK GB IE ES PT DE AT FR IT PL RU TR US CA MX BR AR CL CO JP TW TH ID IN AU NZ ZA MA NG GH"
 ).split()
 
 

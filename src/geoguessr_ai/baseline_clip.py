@@ -5,7 +5,7 @@ Girdi: prep_data.py çıktısı (manifest.csv, classes.json, images/).
        confusion.png,predictions.csv} ve run_config.json.
 
 Kullanım (Kaggle):
-  python -m geoguessr_ai.baseline_clip --root /kaggle/working/osv5m_subset
+  python -m geoguessr_ai.baseline_clip --root /kaggle/working/subset
   python -m geoguessr_ai.baseline_clip --root ... --model geolocal/StreetCLIP \\
       --out results/streetclip_zeroshot
 
@@ -176,15 +176,17 @@ def save_confusion_png(cm: np.ndarray, classes: list[str], path: Path) -> None:
     plt.close(fig)
 
 
-def run_split(enc, text_emb, df, classes, root, split, out, batch_size, workers) -> dict:
-    sub = df[df["split"] == split].reset_index(drop=True)
-    paths = [root / p for p in sub["path"]]
-    logits, ok = image_logits(enc, text_emb, paths, batch_size, workers)
-    n_missing = int((~ok).sum())
-    if n_missing:
-        print(f"UYARI [{split}]: {n_missing} görüntü okunamadı, atlandı")
-    sub = sub[ok].reset_index(drop=True)
-    labels = sub["label"].to_numpy()
+def write_split_results(
+    out: Path,
+    split: str,
+    ids,
+    labels: np.ndarray,
+    logits: np.ndarray,
+    classes: list[str],
+    n_missing: int = 0,
+) -> dict:
+    """Bir split'in metrik/dosya çıktıları. baseline_clip ve train aynı biçimi paylaşır."""
+    sub = pd.DataFrame({"id": list(ids)})
     hit1, hitk, pred, topk = evaluate(logits, labels)
 
     per = (
@@ -218,6 +220,19 @@ def run_split(enc, text_emb, df, classes, root, split, out, batch_size, workers)
     ).to_csv(out / f"{split}_predictions.csv", index=False)
     print(f"[{split}] {metrics}")
     return metrics
+
+
+def run_split(enc, text_emb, df, classes, root, split, out, batch_size, workers) -> dict:
+    sub = df[df["split"] == split].reset_index(drop=True)
+    paths = [root / p for p in sub["path"]]
+    logits, ok = image_logits(enc, text_emb, paths, batch_size, workers)
+    n_missing = int((~ok).sum())
+    if n_missing:
+        print(f"UYARI [{split}]: {n_missing} görüntü okunamadı, atlandı")
+    sub = sub[ok].reset_index(drop=True)
+    return write_split_results(
+        out, split, sub["id"], sub["label"].to_numpy(), logits, classes, n_missing
+    )
 
 
 def run(args: argparse.Namespace, enc=None) -> dict:
