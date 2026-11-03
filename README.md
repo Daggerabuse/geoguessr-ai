@@ -197,7 +197,7 @@ I built this project with Claude Code as a pair programmer: it handled much of t
   - every number in this README comes from `results/`.
 - **Review:** I read the code before each commit and kept the AI to fixed rules in a `CLAUDE.md` file: no commits on its own, seeds everywhere, ask before changing behaviour.
 - **Interpretation:** I report "on par" with StreetCLIP rather than "beats", and list the limitations above.
-- 
+
 Things that went wrong and what they taught me:
 
 - A Kaggle "Quick Save" created an empty notebook version, and my training notebook silently read from it. Now I pin dataset versions.
