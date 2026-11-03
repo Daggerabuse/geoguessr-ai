@@ -1,5 +1,7 @@
 # geoguessr-ai
 
+![CI](https://github.com/Daggerabuse/geoguessr-ai/actions/workflows/ci.yml/badge.svg)
+
 Predicting the country of street-level photos with CLIP and fine-tuning. The task is 33-way
 country classification on a subset of [OpenStreetView-5M](https://huggingface.co/datasets/osv5m/osv5m),
 comparing zero-shot CLIP, a linear probe and full fine-tuning (LP-FT).
