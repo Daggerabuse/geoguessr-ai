@@ -135,6 +135,9 @@ python -m geoguessr_ai.baseline_clip --root /kaggle/working/subset \
 python -m geoguessr_ai.train --root /kaggle/working/subset --smoke
 python -m geoguessr_ai.train --root /kaggle/working/subset [--tta]
 
+# evaluate a saved checkpoint only (no probe, no training); results go to results/<run-name>/
+python -m geoguessr_ai.train --root /kaggle/working/subset --eval-only --checkpoint <path to best.pt> --tta --run-name clip_vitb16_lpft_tta
+
 # 4. confusion analysis of every run under results/ (writes results/analysis/)
 python -m geoguessr_ai.analyze
 ```

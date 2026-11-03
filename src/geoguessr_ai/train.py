@@ -39,6 +39,7 @@ from geoguessr_ai.baseline_clip import (
 )
 
 DEFAULT_MODEL = "openai/clip-vit-base-patch16"
+DEFAULT_RUN_NAME = "clip_vitb16_lpft"
 CLIP_MEAN = np.array([0.48145466, 0.4578275, 0.40821073], dtype=np.float32)
 CLIP_STD = np.array([0.26862954, 0.26130258, 0.27577711], dtype=np.float32)
 
@@ -183,17 +184,33 @@ def set_seed(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
+def tiny_vision_config():
+    """Tiny random CLIP vision config used by --smoke (no download)."""
+    from transformers import CLIPVisionConfig
+
+    return CLIPVisionConfig(
+        hidden_size=32, intermediate_size=64, num_hidden_layers=2,
+        num_attention_heads=2, image_size=32, patch_size=16, projection_dim=16,
+    )
+
+
+def build_vision(model_name: str, smoke: bool):
+    """Vision encoder architecture only (config, no pretrained weights): for --eval-only."""
+    from transformers import CLIPVisionConfig, CLIPVisionModelWithProjection
+
+    if smoke:
+        return CLIPVisionModelWithProjection(tiny_vision_config())
+    return CLIPVisionModelWithProjection(CLIPVisionConfig.from_pretrained(model_name))
+
+
 def load_backbone(args, n_classes: int, prompts: list[str]):
     """(vision_model, img_size, text_emb[C,D]). --smoke: no download, tiny random model."""
     import torch
 
     if args.smoke:
-        from transformers import CLIPVisionConfig, CLIPVisionModelWithProjection
+        from transformers import CLIPVisionModelWithProjection
 
-        cfg = CLIPVisionConfig(
-            hidden_size=32, intermediate_size=64, num_hidden_layers=2,
-            num_attention_heads=2, image_size=32, patch_size=16, projection_dim=16,
-        )
+        cfg = tiny_vision_config()
         vision = CLIPVisionModelWithProjection(cfg)
         g = torch.Generator().manual_seed(args.seed)
         text = torch.randn(n_classes, cfg.projection_dim, generator=g)
@@ -390,6 +407,72 @@ def finetune(model, train_ds, val_ds, args, device, amp, ckpt_dir: Path, history
 # ----------------------------------------------------------------- run
 
 
+def final_evaluation(model, root, part, size, args, device, amp, out, classes) -> dict:
+    """Evaluate val and test (center crop, or 3-crop TTA with --tta) and write the results."""
+    results = {}
+    for name in ("val", "test"):
+        d = GeoDataset(root, part(name), size, False, tta=args.tta)
+        logits = predict_logits(model, d, args.batch_size, args.workers, device, amp)
+        results[name] = write_split_results(
+            out, name, d.df["id"], d.labels, logits, classes, d.n_missing
+        )
+    return results
+
+
+def check_checkpoint_classes(ckpt_classes, classes) -> None:
+    """The checkpoint head must have been trained on exactly the manifest's class list."""
+    if list(ckpt_classes) != list(classes):
+        raise ValueError(
+            f"checkpoint classes ({len(ckpt_classes)}) differ from classes.json "
+            f"({len(classes)}); evaluate with the manifest the checkpoint was trained on"
+        )
+
+
+def eval_run_config(args, run_name: str, device, meta: dict, n_missing: dict) -> dict:
+    """run_config.json content of an --eval-only run (checkpoint metadata wins over CLI)."""
+    classes = meta["classes"]
+    return {
+        **vars(args),
+        "run_name": run_name,
+        "device": str(device),
+        "versions": library_versions(),
+        "eval_only": True,
+        "checkpoint": str(args.checkpoint),
+        "checkpoint_epoch": meta.get("epoch"),
+        "checkpoint_val_top1": meta.get("val_top1"),
+        "model": meta["model"],
+        "template": meta["template"],
+        "img_size": meta["img_size"],
+        "prompts": build_prompts(classes, meta["template"]),
+        "classes": classes,
+        "n_missing": n_missing,
+    }
+
+
+def run_eval_only(args, root, classes, df, run_name, out, device, amp) -> dict:
+    """Load a checkpoint and evaluate val/test; no probe, no training."""
+    import torch
+
+    ckpt = torch.load(args.checkpoint, map_location=device)
+    check_checkpoint_classes(ckpt["classes"], classes)
+    vision = build_vision(ckpt["model"], args.smoke)
+    head_init = torch.zeros(len(classes), vision.config.projection_dim)  # overwritten below
+    model = make_model(vision, head_init, args.logit_scale).to(device)
+    model.load_state_dict(ckpt["state_dict"])
+
+    def part(name):
+        return df[df["split"] == name].reset_index(drop=True)
+
+    results = final_evaluation(model, root, part, ckpt["img_size"], args, device, amp, out, classes)
+    meta = {k: ckpt[k] for k in ("classes", "model", "template", "img_size")}
+    meta.update({k: ckpt[k] for k in ("epoch", "val_top1") if k in ckpt})
+    n_missing = {name: r["n_missing"] for name, r in results.items()}
+    (out / "run_config.json").write_text(
+        json.dumps(eval_run_config(args, run_name, device, meta, n_missing), indent=2, default=str)
+    )
+    return results
+
+
 def run(args: argparse.Namespace) -> dict:
     import torch
 
@@ -407,6 +490,8 @@ def run(args: argparse.Namespace) -> dict:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     amp = device.type == "cuda"
+    if args.eval_only:
+        return run_eval_only(args, root, classes, df, run_name, out, device, amp)
     prompts = build_prompts(classes, args.template)
     vision, size, text_emb = load_backbone(args, len(classes), prompts)
     model = make_model(vision, text_emb, args.logit_scale).to(device)
@@ -448,21 +533,14 @@ def run(args: argparse.Namespace) -> dict:
 
     # --- Final evaluation: best checkpoint; the test split is used only here
     model.load_state_dict(torch.load(ckpt_dir / "best.pt", map_location=device)["state_dict"])
-    results = {}
-    for name in ("val", "test"):
-        d = GeoDataset(root, part(name), size, False, tta=args.tta)
-        logits = predict_logits(model, d, args.batch_size, args.workers, device, amp)
-        results[name] = write_split_results(
-            out, name, d.df["id"], d.labels, logits, classes, d.n_missing
-        )
-    return results
+    return final_evaluation(model, root, part, size, args, device, amp, out, classes)
 
 
-def main() -> None:
-    sys.stdout.reconfigure(encoding="utf-8")
+def parse_args(argv=None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--root", default="data/subset")
-    ap.add_argument("--run-name", default="clip_vitb16_lpft")
+    ap.add_argument("--run-name", default=None,
+                    help=f"default for training: {DEFAULT_RUN_NAME}; required with --eval-only")
     ap.add_argument("--results-dir", default="results")
     ap.add_argument("--models-dir", default="models")
     ap.add_argument("--model", default=DEFAULT_MODEL)
@@ -482,7 +560,28 @@ def main() -> None:
     ap.add_argument("--tta", action="store_true", help="average of 3 crops: left/center/right (final eval)")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--smoke", action="store_true", help="tiny random model, no download, quick check")
-    run(ap.parse_args())
+    ap.add_argument("--eval-only", action="store_true",
+                    help="skip probe and training: load --checkpoint, evaluate val and test")
+    ap.add_argument("--checkpoint", type=Path, help="checkpoint (best.pt) for --eval-only")
+    args = ap.parse_args(argv)
+    if args.eval_only:
+        if args.checkpoint is None:
+            ap.error("--eval-only requires --checkpoint")
+        if not args.checkpoint.is_file():
+            ap.error(f"checkpoint not found: {args.checkpoint}")
+        if args.run_name is None:
+            # the default name is the committed training run: never overwrite it by accident
+            ap.error("--eval-only requires an explicit --run-name")
+    elif args.checkpoint is not None:
+        ap.error("--checkpoint is only valid together with --eval-only")
+    if args.run_name is None:
+        args.run_name = DEFAULT_RUN_NAME
+    return args
+
+
+def main() -> None:
+    sys.stdout.reconfigure(encoding="utf-8")
+    run(parse_args())
 
 
 if __name__ == "__main__":
