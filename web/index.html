@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>geoguessr-ai: which country is this street in?</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="style.css">
+  <!-- onnxruntime-web, pinned; the .wasm files are loaded from the same CDN folder (app.js) -->
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.31.1/dist/ort.min.js"></script>
+</head>
+<body>
+<main>
+  <h1>geoguessr-ai</h1>
+  <p class="lead">Upload a street-level photo; the model guesses the country.
+    It runs entirely in your browser.</p>
+
+  <p class="privacy"><strong>Your photo never leaves your device.</strong>
+    The model is downloaded once and the prediction is computed locally; nothing is uploaded.</p>
+
+  <section id="drop" class="drop" tabindex="0">
+    <input id="file" type="file" accept="image/*" hidden>
+    <p>Drop a photo here, or <button id="pick" type="button">choose a file</button></p>
+  </section>
+
+  <p id="status" class="status" role="status">Loading the model…</p>
+  <progress id="progress" max="1" value="0" hidden></progress>
+
+  <section id="result" class="result" hidden>
+    <div class="preview">
+      <img id="preview" alt="Uploaded photo">
+      <div class="crops-wrap">
+        <p class="small">The three crops the model looks at (their predictions are averaged):</p>
+        <div id="crops" class="crops"></div>
+      </div>
+    </div>
+    <div>
+      <h2>Top-5 countries</h2>
+      <ol id="top5" class="top5"></ol>
+      <p id="timing" class="small"></p>
+    </div>
+  </section>
+
+  <section class="warning">
+    <p><strong>Limited to <span id="n-classes">33</span> countries.</strong>
+      The model always answers with one of them, even for a photo taken elsewhere.</p>
+    <details><summary>Countries</summary><p id="countries" class="small"></p></details>
+  </section>
+
+  <section class="small about">
+    <p>CLIP ViT-B/16 fine-tuned on a subset of
+      <a href="https://huggingface.co/datasets/osv5m/osv5m">OpenStreetView-5M</a> (CC BY-SA 4.0),
+      exported to ONNX and run with
+      <a href="https://onnxruntime.ai/docs/tutorials/web/">onnxruntime-web</a>.
+      Model: <a id="model-link" href="https://huggingface.co/Daggerabuse/geoguessr-clip-vitb16">Daggerabuse/geoguessr-clip-vitb16</a>
+      (<span id="variant">8-bit</span>, <a id="variant-switch" href="?model=fp32">use fp32</a>).
+      Preprocessing as in training: short side 224 (bicubic), left/center/right crops, no flips.</p>
+    <p>Code, training details and results:
+      <a href="https://github.com/Daggerabuse/geoguessr-ai">github.com/Daggerabuse/geoguessr-ai</a></p>
+  </section>
+</main>
+<script type="module" src="app.js"></script>
+</body>
+</html>

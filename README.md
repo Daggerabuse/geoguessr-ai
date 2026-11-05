@@ -226,7 +226,7 @@ Evaluation: short side 224 + center crop; `--tta` averages left/center/right cro
 
 ## License
 
-- Code: MIT (a `LICENSE` file will be added).
+- Code: Code: MIT, see [LICENSE](LICENSE).
 - Data: [OpenStreetView-5M](https://huggingface.co/datasets/osv5m/osv5m), **CC BY-SA 4.0**.
   Astruc et al., "OpenStreetView-5M: The Many Roads to Global Visual Geolocation", CVPR 2024.
 - Models: [openai/clip-vit-large-patch14](https://huggingface.co/openai/clip-vit-large-patch14),

@@ -1,0 +1,75 @@
+{
+  "variant": "fp32",
+  "browser": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/156.0.0.0 Safari/537.36 Edg/156.0.0.0",
+  "n_images": 100,
+  "pixels_vs_torch": {
+    "n": 100,
+    "logit_max_abs_diff": 2.09808349609375e-05,
+    "logit_mean_abs_diff": 3.8175871850398835e-06,
+    "logit_p99_abs_diff": 1.9092560251010582e-05,
+    "prob_max_abs_diff": 3.464103546013675e-06,
+    "top1_agreement": 1.0,
+    "top1_in_top5": 1.0,
+    "top5_set_agreement": 1.0
+  },
+  "jpeg_decode_vs_pil": {
+    "n_same_size": 100,
+    "max": {
+      "max": 0.0,
+      "mean": 0.0
+    },
+    "mean": {
+      "max": 0.0,
+      "mean": 0.0
+    },
+    "frac_nonzero": {
+      "max": 0.0,
+      "mean": 0.0
+    }
+  },
+  "browser_jpeg_pipeline_vs_torch": {
+    "n": 100,
+    "logit_max_abs_diff": 2.09808349609375e-05,
+    "logit_mean_abs_diff": 3.8175871850398835e-06,
+    "logit_p99_abs_diff": 1.9092560251010582e-05,
+    "prob_max_abs_diff": 3.464103546013675e-06,
+    "top1_agreement": 1.0,
+    "top1_in_top5": 1.0,
+    "top5_set_agreement": 1.0
+  },
+  "canvas_resize_vs_pil": {
+    "max": {
+      "max": 47.0,
+      "mean": 20.3
+    },
+    "mean": {
+      "max": 2.597904682007031,
+      "mean": 0.7868113409007436
+    },
+    "frac_nonzero": {
+      "max": 0.7738294982422499,
+      "mean": 0.431618555728972
+    }
+  },
+  "canvas_resize_pipeline_vs_torch": {
+    "n": 100,
+    "logit_max_abs_diff": 1.0256900787353516,
+    "logit_mean_abs_diff": 0.2156413495540619,
+    "logit_p99_abs_diff": 1.0091100931167603,
+    "prob_max_abs_diff": 0.12705157740163375,
+    "top1_agreement": 0.95,
+    "top1_in_top5": 1.0,
+    "top5_set_agreement": 0.59
+  },
+  "ms_per_image": {
+    "preprocess": {
+      "max": 27.0,
+      "mean": 15.558999999910593
+    },
+    "model": {
+      "max": 2262.7999999970198,
+      "mean": 2163.012999999225
+    }
+  },
+  "console": []
+}

@@ -1,0 +1,67 @@
+{
+  "n_images": 2500,
+  "tta": true,
+  "n_classes": 33,
+  "seconds_per_image": {
+    "torch": 0.3873,
+    "fp32": 0.2655,
+    "int8": 0.649
+  },
+  "fp32": {
+    "n": 2500,
+    "logit_max_abs_diff": 9.918212890625e-05,
+    "logit_mean_abs_diff": 3.660398533611442e-06,
+    "logit_p99_abs_diff": 2.09808349609375e-05,
+    "prob_max_abs_diff": 1.2915966500215426e-05,
+    "top1_agreement": 1.0,
+    "top1_in_top5": 1.0,
+    "top5_set_agreement": 1.0
+  },
+  "int8": {
+    "n": 2500,
+    "logit_max_abs_diff": 0.26931190490722656,
+    "logit_mean_abs_diff": 0.04309484362602234,
+    "logit_p99_abs_diff": 0.20605386793613434,
+    "prob_max_abs_diff": 0.04209752761329083,
+    "top1_agreement": 0.9856,
+    "top1_in_top5": 1.0,
+    "top5_set_agreement": 0.8896
+  },
+  "int8_vs_fp32": {
+    "n": 2500,
+    "logit_max_abs_diff": 0.26930999755859375,
+    "logit_mean_abs_diff": 0.04309487342834473,
+    "logit_p99_abs_diff": 0.2060576230287552,
+    "prob_max_abs_diff": 0.04209723781985236,
+    "top1_agreement": 0.9856,
+    "top1_in_top5": 1.0,
+    "top5_set_agreement": 0.8896
+  },
+  "export": {
+    "opset": 18,
+    "input": "pixel_values",
+    "output": "logits",
+    "input_shape": [
+      "N",
+      3,
+      224,
+      224
+    ],
+    "output_shape": [
+      "N",
+      33
+    ],
+    "n_classes": 33,
+    "quantization": {
+      "method": "onnxruntime MatMulNBitsQuantizer (weight-only)",
+      "bits": 8,
+      "block_size": 32,
+      "symmetric": true
+    },
+    "files": {
+      "model.onnx": 345896220,
+      "model_int8.onnx": 101469485
+    },
+    "export_seconds": 7.0
+  }
+}

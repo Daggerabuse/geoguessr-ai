@@ -20,9 +20,18 @@ ml = [
     "torch",
     "transformers",
 ]
+onnx = [
+    "onnx>=1.23.2",
+    "onnxruntime>=1.31.1",
+    "onnxscript>=0.7.2",
+]
 
 [dependency-groups]
+browser = [
+    "playwright>=1.64.1",
+]
 dev = [
+    "nodejs-wheel-binaries>=24.19.0",
     "pandas-stubs~=3.1.0",
     "pytest>=9.2.0",
     "ruff>=0.17.3",
