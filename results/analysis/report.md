@@ -336,3 +336,59 @@ top-1 (recall, weighted mean) = 0.708, countries = 33
 | GH | NG | 104 | 0.520 | 0.451 | 0.588 |
 | US | CA | 7 | 0.035 | 0.017 | 0.070 |
 | CA | US | 37 | 0.185 | 0.137 | 0.245 |
+
+## streetclip_zeroshot_tta
+top-1 (recall, weighted mean) = 0.726, countries = 33
+
+### Attractor countries (predicted/true >= threshold and precision < recall)
+| country | recall | precision | pred_ratio | attractor_clear |
+|---|---|---|---|---|
+| NG | 0.86 | 0.48 | 1.81 | True |
+| JP | 0.96 | 0.68 | 1.42 | True |
+| SE | 0.73 | 0.55 | 1.34 | True |
+| US | 0.93 | 0.71 | 1.31 | True |
+`attractor_clear=True`: the precision interval is separated from the recall interval.
+
+### Focus countries
+| country | recall | recall_lo | recall_hi | precision | pred_ratio |
+|---|---|---|---|---|---|
+| FI | 0.56 | 0.50 | 0.63 | 0.76 | 0.74 |
+| SE | 0.73 | 0.67 | 0.79 | 0.55 | 1.34 |
+
+### 10 most confused pairs (true -> predicted)
+| true | pred | count | share_of_true |
+|---|---|---|---|
+| GH | NG | 110 | 0.550 |
+| FI | SE | 68 | 0.340 |
+| TW | JP | 43 | 0.215 |
+| CA | US | 38 | 0.190 |
+| PL | DE | 30 | 0.150 |
+| PT | ES | 29 | 0.145 |
+| AT | DE | 27 | 0.135 |
+| CO | BR | 26 | 0.130 |
+| DE | AT | 26 | 0.130 |
+| NO | SE | 26 | 0.130 |
+
+### Pairs of interest (true -> predicted; directed)
+| true | pred | count | share_of_true | lo | hi |
+|---|---|---|---|---|---|
+| SE | NO | 12 | 0.060 | 0.035 | 0.102 |
+| SE | FI | 24 | 0.120 | 0.082 | 0.172 |
+| SE | DK | 10 | 0.050 | 0.027 | 0.090 |
+| NO | SE | 26 | 0.130 | 0.090 | 0.184 |
+| NO | FI | 6 | 0.030 | 0.014 | 0.064 |
+| NO | DK | 0 | 0.000 | 0.000 | 0.019 |
+| FI | SE | 68 | 0.340 | 0.278 | 0.408 |
+| FI | NO | 7 | 0.035 | 0.017 | 0.070 |
+| FI | DK | 0 | 0.000 | 0.000 | 0.019 |
+| DK | SE | 14 | 0.070 | 0.042 | 0.114 |
+| DK | NO | 0 | 0.000 | 0.000 | 0.019 |
+| DK | FI | 0 | 0.000 | 0.000 | 0.019 |
+| AR | CL | 19 | 0.095 | 0.062 | 0.144 |
+| CL | AR | 14 | 0.070 | 0.042 | 0.114 |
+| ES | PT | 17 | 0.085 | 0.054 | 0.132 |
+| PT | ES | 29 | 0.145 | 0.103 | 0.200 |
+| NG | GH | 20 | 0.100 | 0.066 | 0.149 |
+| GH | NG | 110 | 0.550 | 0.481 | 0.617 |
+| US | CA | 5 | 0.025 | 0.011 | 0.057 |
+| CA | US | 38 | 0.190 | 0.142 | 0.250 |
