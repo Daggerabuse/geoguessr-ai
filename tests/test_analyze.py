@@ -2,6 +2,7 @@ import math
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from geoguessr_ai import analyze as a
 
@@ -90,18 +91,138 @@ def test_main_writes_dumbbell_only_when_both_runs_exist(tmp_path, monkeypatch):
 def test_default_plot_compares_both_tta_runs(tmp_path, monkeypatch):
     """Without --plot-runs the plot is LP-FT + TTA vs. StreetCLIP + TTA (like for like)."""
     results = tmp_path / "results"
-    png = results / "analysis" / "per_country_lpft_vs_streetclip.png"
-    for run in ("clip_vitb16_lpft_tta", "streetclip_zeroshot", "streetclip_zeroshot_tta"):
+    # a distinct top-1 per run, so the plotted data identifies the run it came from
+    top1 = {"clip_vitb16_lpft": 0.1, "clip_vitb16_lpft_tta": 0.2,
+            "streetclip_zeroshot": 0.3, "streetclip_zeroshot_tta": 0.4}
+    for run, v in top1.items():
         (results / run).mkdir(parents=True)
         _cm().to_csv(results / run / "test_confusion.csv")
-    _per_country_csv(results / "clip_vitb16_lpft_tta" / "test_per_country.csv", {"A": 0.8, "B": 0.4})
-    _per_country_csv(results / "streetclip_zeroshot" / "test_per_country.csv", {"A": 0.7, "B": 0.5})
+        _per_country_csv(results / run / "test_per_country.csv", {"A": v, "B": v})
+    calls = []
+    monkeypatch.setattr(a, "plot_dumbbell", lambda *args: calls.append(args))
     monkeypatch.setattr("sys.argv", ["analyze", "--results", str(results)])
     a.main()
-    assert not png.exists()  # the no-TTA StreetCLIP run alone is not used
-    _per_country_csv(results / "streetclip_zeroshot_tta" / "test_per_country.csv", {"A": 0.6, "B": 0.5})
+    assert len(calls) == 1
+    df_a, df_b, label_a, label_b, split, out = calls[0]
+    assert set(df_a["top1"]) == {top1["clip_vitb16_lpft_tta"]}
+    assert set(df_b["top1"]) == {top1["streetclip_zeroshot_tta"]}
+    assert "TTA" in label_a and "TTA" in label_b
+    assert split == "test" and out.name == "per_country_lpft_vs_streetclip.png"
+
+
+def _predictions(path, rows):
+    """rows: (id, true, pred, top5 codes); written like baseline_clip / train do."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows, columns=["id", "true", "pred", "top5"]).to_csv(path, index=False)
+
+
+def _paired_preds(n_both, n_a_only, n_b_only, n_none):
+    """Two prediction tables on the same images with the given top-1 agreement pattern."""
+    pattern = ([(1, 1)] * n_both + [(1, 0)] * n_a_only + [(0, 1)] * n_b_only
+               + [(0, 0)] * n_none)
+    ra, rb = [], []
+    for i, (ok_a, ok_b) in enumerate(pattern):
+        ra.append((str(i), "A", "A" if ok_a else "B", "A B" if ok_a else "B C"))
+        rb.append((str(i), "A", "A" if ok_b else "C", "C A" if ok_b else "C B"))
+    cols = ["id", "true", "pred", "top5"]
+    return pd.DataFrame(ra, columns=cols), pd.DataFrame(rb, columns=cols)
+
+
+def test_mcnemar_exact():
+    assert a.mcnemar_exact(0, 0) == 1.0
+    assert a.mcnemar_exact(3, 3) == 1.0
+    assert math.isclose(a.mcnemar_exact(0, 5), 2 / 32)
+    assert math.isclose(a.mcnemar_exact(5, 0), 2 / 32)
+    # 2 vs. 8: P(X <= 2) for Binomial(10, 0.5) = 56/1024, two-sided
+    assert math.isclose(a.mcnemar_exact(2, 8), 2 * 56 / 1024)
+
+
+def test_paired_comparison_counts_and_difference():
+    pa, pb = _paired_preds(n_both=50, n_a_only=30, n_b_only=10, n_none=10)
+    df = a.paired_comparison(pa, pb, n_boot=2000, seed=0).set_index("metric")
+    t1 = df.loc["top1"]
+    assert t1["n"] == 100 and t1["a_only"] == 30 and t1["b_only"] == 10
+    assert math.isclose(t1["acc_a"], 0.8) and math.isclose(t1["acc_b"], 0.6)
+    assert math.isclose(t1["diff"], 0.2)
+    assert t1["ci_lo"] < 0.2 < t1["ci_hi"]
+    assert math.isclose(t1["mcnemar_p"], a.mcnemar_exact(30, 10))
+    # top-5: a's top-5 has A when right, b's top-5 has A when right -> same pattern here
+    assert df.loc["top5", "a_only"] == 30 and df.loc["top5", "b_only"] == 10
+
+
+def test_paired_comparison_is_seeded_and_matches_image_resampling():
+    pa, pb = _paired_preds(n_both=120, n_a_only=40, n_b_only=25, n_none=15)
+    r1 = a.paired_comparison(pa, pb, n_boot=4000, seed=7)
+    r2 = a.paired_comparison(pa, pb, n_boot=4000, seed=7)
+    pd.testing.assert_frame_equal(r1, r2)
+    # the multinomial shortcut gives the same interval as resampling images directly
+    d = ((pa["pred"] == "A").astype(int) - (pb["pred"] == "A").astype(int)).to_numpy()
+    rng = np.random.default_rng(1)
+    idx = rng.integers(0, len(d), size=(4000, len(d)))
+    lo, hi = np.percentile(d[idx].mean(1), [2.5, 97.5])
+    t1 = r1.set_index("metric").loc["top1"]
+    assert abs(t1["ci_lo"] - lo) < 0.015 and abs(t1["ci_hi"] - hi) < 0.015
+
+
+def test_paired_comparison_rejects_different_images_or_labels():
+    pa, pb = _paired_preds(5, 1, 1, 1)
+    with pytest.raises(ValueError, match="same images"):
+        a.paired_comparison(pa, pb.assign(id=pb["id"] + "x"))
+    with pytest.raises(ValueError, match="true labels"):
+        a.paired_comparison(pa, pb.assign(true="B"))
+
+
+def test_main_writes_paired_comparison_for_default_runs(tmp_path, monkeypatch):
+    results = tmp_path / "results"
+    pa, pb = _paired_preds(n_both=6, n_a_only=3, n_b_only=1, n_none=0)
+    for run, pred in (("clip_vitb16_lpft_tta", pa), ("streetclip_zeroshot_tta", pb)):
+        (results / run).mkdir(parents=True)
+        _cm().to_csv(results / run / "test_confusion.csv")
+        _predictions(results / run / "test_predictions.csv", pred.to_numpy().tolist())
+    monkeypatch.setattr("sys.argv", ["analyze", "--results", str(results), "--n-boot", "200"])
     a.main()
-    assert png.exists()
+    out = pd.read_csv(results / "analysis" / "paired_comparison.csv").set_index("metric")
+    assert out.loc["top1", "run_a"] == "clip_vitb16_lpft_tta"
+    assert out.loc["top1", "run_b"] == "streetclip_zeroshot_tta"
+    assert out.loc["top1", "a_only"] == 3 and out.loc["top1", "b_only"] == 1
+    assert "Paired comparison" in (results / "analysis" / "report.md").read_text(encoding="utf-8")
+    assert len(out) == 2  # the no-TTA pair has no predictions here, so it is skipped
+
+
+def test_main_writes_one_block_of_rows_per_pair(tmp_path, monkeypatch):
+    """Default pairs: LP-FT vs. StreetCLIP with TTA, then without TTA, in one CSV."""
+    results = tmp_path / "results"
+    tta = _paired_preds(n_both=6, n_a_only=3, n_b_only=1, n_none=0)
+    no_tta = _paired_preds(n_both=5, n_a_only=1, n_b_only=4, n_none=0)
+    runs = {"clip_vitb16_lpft_tta": tta[0], "streetclip_zeroshot_tta": tta[1],
+            "clip_vitb16_lpft": no_tta[0], "streetclip_zeroshot": no_tta[1]}
+    for run, pred in runs.items():
+        (results / run).mkdir(parents=True)
+        _cm().to_csv(results / run / "test_confusion.csv")
+        _predictions(results / run / "test_predictions.csv", pred.to_numpy().tolist())
+    monkeypatch.setattr("sys.argv", ["analyze", "--results", str(results), "--n-boot", "200"])
+    a.main()
+    out = pd.read_csv(results / "analysis" / "paired_comparison.csv")
+    assert out[["run_a", "run_b", "metric"]].values.tolist() == [
+        ["clip_vitb16_lpft_tta", "streetclip_zeroshot_tta", "top1"],
+        ["clip_vitb16_lpft_tta", "streetclip_zeroshot_tta", "top5"],
+        ["clip_vitb16_lpft", "streetclip_zeroshot", "top1"],
+        ["clip_vitb16_lpft", "streetclip_zeroshot", "top5"],
+    ]
+    top1 = out[out["metric"] == "top1"]
+    assert top1["a_only"].tolist() == [3, 1] and top1["b_only"].tolist() == [1, 4]
+    report = (results / "analysis" / "report.md").read_text(encoding="utf-8")
+    assert report.count("## Paired comparison") == 2
+
+
+def test_main_rejects_odd_number_of_paired_runs(tmp_path, monkeypatch):
+    results = tmp_path / "results"
+    (results / "runA").mkdir(parents=True)
+    _cm().to_csv(results / "runA" / "test_confusion.csv")
+    argv = ["analyze", "--results", str(results), "--paired-runs", "runA", "runB", "runC"]
+    monkeypatch.setattr("sys.argv", argv)
+    with pytest.raises(SystemExit, match="pairs"):
+        a.main()
 
 
 def test_text_outputs_use_lf_line_endings(tmp_path, monkeypatch):

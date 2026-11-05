@@ -1,0 +1,10 @@
+# Text files are stored and checked out with LF on every OS (results diffs stay clean on Windows).
+* text=auto eol=lf
+
+# Binary files: no line-ending conversion, no text diff.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.onnx binary
+*.pt binary
+*.safetensors binary

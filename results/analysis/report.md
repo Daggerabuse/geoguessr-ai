@@ -392,3 +392,19 @@ top-1 (recall, weighted mean) = 0.726, countries = 33
 | GH | NG | 110 | 0.550 | 0.481 | 0.617 |
 | US | CA | 5 | 0.025 | 0.011 | 0.057 |
 | CA | US | 38 | 0.190 | 0.142 | 0.250 |
+
+## Paired comparison: clip_vitb16_lpft_tta (a) vs. streetclip_zeroshot_tta (b)
+Same images for both runs; diff = a - b. 95% interval: paired bootstrap over images (10000 resamples, seed 42). a_only / b_only: images only that run gets right. p: exact McNemar test.
+
+| metric | n | acc_a | acc_b | diff | ci_lo | ci_hi | a_only | b_only | mcnemar_p |
+|---|---|---|---|---|---|---|---|---|---|
+| top1 | 6600 | 0.7318 | 0.7262 | 0.0056 | -0.0077 | 0.0185 | 967 | 930 | 0.41 |
+| top5 | 6600 | 0.9345 | 0.9627 | -0.0282 | -0.0350 | -0.0215 | 169 | 355 | 3.1e-16 |
+
+## Paired comparison: clip_vitb16_lpft (a) vs. streetclip_zeroshot (b)
+Same images for both runs; diff = a - b. 95% interval: paired bootstrap over images (10000 resamples, seed 42). a_only / b_only: images only that run gets right. p: exact McNemar test.
+
+| metric | n | acc_a | acc_b | diff | ci_lo | ci_hi | a_only | b_only | mcnemar_p |
+|---|---|---|---|---|---|---|---|---|---|
+| top1 | 6600 | 0.7085 | 0.7079 | 0.0006 | -0.0127 | 0.0136 | 976 | 972 | 0.95 |
+| top5 | 6600 | 0.9255 | 0.9585 | -0.0330 | -0.0403 | -0.0259 | 184 | 402 | 1.2e-19 |

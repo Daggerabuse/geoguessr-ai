@@ -7,11 +7,14 @@ country classification on a subset of [OpenStreetView-5M](https://huggingface.co
 comparing zero-shot CLIP, a linear probe and full fine-tuning (LP-FT).
 
 Main result: CLIP ViT-B/16 with LP-FT reaches 0.708 top-1 on the test split with a single center crop,
-24.0 points above the zero-shot accuracy of the same backbone, and on par with StreetCLIP zero-shot
-(0.708; ViT-L/14, 336 px). Test-time augmentation (TTA, average over 3 crops) was adopted because it
+24.0 points above the zero-shot accuracy of the same backbone, and on par in top-1 with StreetCLIP
+zero-shot (0.708; ViT-L/14, 336 px; paired test p = 0.95), though StreetCLIP is significantly ahead
+in top-5 (0.958 vs. 0.925). Test-time augmentation (TTA, average over 3 crops) was adopted because it
 improved the val split (0.787 to 0.808). With the same TTA on both models, LP-FT reaches 0.732 test top-1
-and StreetCLIP 0.726: a 0.6-point difference, inside the noise (the 95% interval of each test top-1 is
-about +-1.1 points), so the two are on par in top-1. StreetCLIP is ahead on top-5 (0.963 vs. 0.935).
+and StreetCLIP 0.726. In a paired test on the same 6600 images the 0.6-point difference is not
+significant (95% interval -0.8 to +1.8 points, McNemar p = 0.41), so the two are on par in top-1.
+In top-5, StreetCLIP is ahead (0.963 vs. 0.935), and this difference is significant
+(-2.8 points, 95% interval -3.5 to -2.2, p < 0.001).
 
 - **Live demo (runs in your browser):** https://huggingface.co/spaces/Daggerabuse/geoguessr-ai
 - **Model:** https://huggingface.co/Daggerabuse/geoguessr-clip-vitb16
@@ -35,22 +38,37 @@ is about 0.03 top-1. All numbers are read from `results/*/{test,val}_metrics.jso
 | CLIP ViT-B/16, LP-FT (fine-tuned) | 0.708 | 0.925 | 0.787 |
 | CLIP ViT-B/16, LP-FT + TTA (3 crops) | 0.732 | 0.935 | 0.808 |
 
-Gain from zero-shot to LP-FT on the same backbone: 24.0 points (test top-1). LP-FT versus
-StreetCLIP zero-shot: 0.1 points, which is well inside the noise of a single run, so the two are
-treated as on par.
+Gain from zero-shot to LP-FT on the same backbone: 24.0 points (test top-1).
 
 TTA (average over the left, center and right crops) was chosen based on the val split: for the same
 checkpoint, evaluated with `--eval-only --tta` and no retraining, val top-1 went from 0.787 to 0.808.
 On test, top-1 is 0.732 with TTA versus 0.708 without. StreetCLIP was evaluated with the same 3-crop
-TTA (logits averaged): test top-1 goes from 0.708 to 0.726. With TTA on both sides, LP-FT is 0.6 points
-ahead in test top-1, while the 95% (Wilson) interval of each test top-1 is about +-1.1 points
-(n = 6600), so the two are treated as on par. In top-5, StreetCLIP is ahead (0.963 vs. 0.935).
+TTA (logits averaged): test top-1 goes from 0.708 to 0.726.
+
+LP-FT and StreetCLIP were compared image by image, both without TTA and both with the same TTA
+(`results/analysis/paired_comparison.csv`, from `results/*/test_predictions.csv`;
+difference = LP-FT - StreetCLIP):
+
+| | Difference | 95% interval (paired bootstrap) | Only LP-FT right | Only StreetCLIP right | McNemar p |
+|---|---|---|---|---|---|
+| Test top-1, no TTA | +0.1 points | -1.3 to +1.4 | 976 | 972 | 0.95 |
+| Test top-5, no TTA | -3.3 points | -4.0 to -2.6 | 184 | 402 | < 0.001 |
+| Test top-1, TTA | +0.6 points | -0.8 to +1.8 | 967 | 930 | 0.41 |
+| Test top-5, TTA | -2.8 points | -3.5 to -2.2 | 169 | 355 | < 0.001 |
+
+In both settings the top-1 difference is not significant, so the two are treated as on par in
+top-1; the top-5 difference is significant, so StreetCLIP is better in top-5. On par does not mean
+the two get the same images right: each gets about 970 test images right that the other gets wrong.
+The bootstrap resamples images
+(10000 resamples, seed 42) and treats them as independent; images from the same sequence are
+correlated, so the true intervals may be somewhat wider.
 
 ## Findings
 
 Details are in `results/analysis/report.md`; per-country accuracy is in `results/*/test_per_country.csv`.
-With 200 test images per country, the 95% interval of a per-country accuracy is roughly +-7 points,
-so only differences larger than 10 points are discussed below.
+With 200 test images per country, the 95% interval of one country's accuracy is roughly +-7 points.
+The difference between two models has a standard error about sqrt(2) times larger, so its 95%
+interval is roughly +-10 points; that is why only differences larger than 10 points are discussed below.
 
 - **Where the gain comes from.** On the same ViT-B/16 backbone, the linear probe adds 13.2 points
   over zero-shot and full fine-tuning adds another 10.8 points on top of the probe (test top-1).
@@ -81,8 +99,9 @@ so only differences larger than 10 points are discussed below.
 ### Figures
 
 Per-country test top-1 of the fine-tuned ViT-B/16 (LP-FT) and StreetCLIP zero-shot, both with the
-same 3-crop TTA, sorted by the difference between them. Differences smaller than about 7 points are
-within the 95% interval.
+same 3-crop TTA, sorted by the difference between them. The 95% interval of a single dot is about
++-7 points, and that of the gap between two dots about +-10 points, so gaps smaller than about
+10 points should not be read as real differences.
 
 ![Per-country test top-1: LP-FT with TTA vs. StreetCLIP zero-shot with TTA](results/analysis/per_country_lpft_vs_streetclip.png)
 
@@ -116,7 +135,11 @@ PyTorch model (3-crop TTA), measured on 2500 other images from `data/sample`
 | Max logit difference, onnxruntime | 1e-4 | 0.27 |
 | Top-1 agreement in the browser (Edge, onnxruntime-web) | 1.000 (100 images) | 0.995 (200 images) |
 
-These are agreement numbers, not accuracy. Details: [NOTES_ONNX.md](NOTES_ONNX.md).
+These are agreement numbers, not accuracy. The onnxruntime rows come from `results/onnx_parity/report.json`
+(`export_onnx --verify`). The browser row was measured locally in an installed Edge (headless, via
+Playwright, `webdemo check`); its results are in `results/onnx_parity/web_fp32.json` and
+`results/onnx_parity/web_int8.json`. That check needs the local model files and Edge, so it is not
+part of CI. Details: [NOTES_ONNX.md](NOTES_ONNX.md).
 
 ## Limitations
 
