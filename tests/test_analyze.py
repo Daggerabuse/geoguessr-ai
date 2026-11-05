@@ -85,3 +85,35 @@ def test_main_writes_dumbbell_only_when_both_runs_exist(tmp_path, monkeypatch):
     _per_country_csv(results / "runB" / "test_per_country.csv", {"A": 0.7, "B": 0.5, "C": 0.9})
     a.main()
     assert (results / "analysis" / "per_country_lpft_vs_streetclip.png").exists()
+
+
+def test_default_plot_compares_both_tta_runs(tmp_path, monkeypatch):
+    """Without --plot-runs the plot is LP-FT + TTA vs. StreetCLIP + TTA (like for like)."""
+    results = tmp_path / "results"
+    png = results / "analysis" / "per_country_lpft_vs_streetclip.png"
+    for run in ("clip_vitb16_lpft_tta", "streetclip_zeroshot", "streetclip_zeroshot_tta"):
+        (results / run).mkdir(parents=True)
+        _cm().to_csv(results / run / "test_confusion.csv")
+    _per_country_csv(results / "clip_vitb16_lpft_tta" / "test_per_country.csv", {"A": 0.8, "B": 0.4})
+    _per_country_csv(results / "streetclip_zeroshot" / "test_per_country.csv", {"A": 0.7, "B": 0.5})
+    monkeypatch.setattr("sys.argv", ["analyze", "--results", str(results)])
+    a.main()
+    assert not png.exists()  # the no-TTA StreetCLIP run alone is not used
+    _per_country_csv(results / "streetclip_zeroshot_tta" / "test_per_country.csv", {"A": 0.6, "B": 0.5})
+    a.main()
+    assert png.exists()
+
+
+def test_text_outputs_use_lf_line_endings(tmp_path, monkeypatch):
+    """Same bytes on every OS (on Windows pandas/write_text would otherwise write CRLF)."""
+    results = tmp_path / "results"
+    (results / "runA").mkdir(parents=True)
+    _cm().to_csv(results / "runA" / "test_confusion.csv")
+    monkeypatch.setattr("sys.argv", ["analyze", "--results", str(results)])
+    a.main()
+    files = [p for p in (results / "analysis").iterdir() if p.suffix in {".csv", ".md"}]
+    assert {p.name for p in files} >= {"report.md", "precision_recall.csv", "runA_pairs.csv",
+                                       "runA_top_confusions.csv"}
+    for p in files:
+        data = p.read_bytes()
+        assert b"\n" in data and b"\r" not in data, p.name

@@ -8,6 +8,7 @@ Output under results/analysis/:
   <run>_pairs.csv              directed pairs of interest
   report.md                    readable summary
   per_country_lpft_vs_streetclip.png   dumbbell plot of per-country top-1 for two runs
+                               (default: LP-FT + TTA vs. StreetCLIP zero-shot + TTA)
 
 Usage:
   python -m geoguessr_ai.analyze                       # all runs under results/*/
@@ -46,6 +47,11 @@ def wilson(k: np.ndarray, n: np.ndarray, z: float = 1.96):
         centre = (p + z**2 / (2 * n)) / den
         half = z * np.sqrt(p * (1 - p) / n + z**2 / (4 * n**2)) / den
     return centre - half, centre + half
+
+
+def write_csv(df: pd.DataFrame, path: Path) -> None:
+    """CSV with LF line endings on every OS (pandas defaults to os.linesep, CRLF on Windows)."""
+    df.to_csv(path, index=False, lineterminator="\n")
 
 
 def load_confusion(path: Path) -> pd.DataFrame:
@@ -237,8 +243,8 @@ def analyze_run(path: Path, results: Path, split: str, out: Path, args) -> pd.Da
     pc = per_country(cm, args.attractor_ratio)
     top = confusions(cm).head(args.top)
     pairs = pair_table(cm, PAIR_GROUPS)
-    top.to_csv(out / f"{stem}_top_confusions.csv", index=False)
-    pairs.to_csv(out / f"{stem}_pairs.csv", index=False)
+    write_csv(top, out / f"{stem}_top_confusions.csv")
+    write_csv(pairs, out / f"{stem}_pairs.csv")
     report = build_report(name, pc, top, pairs, args.focus, args.top)
     return pc.assign(run=name), report
 
@@ -254,11 +260,13 @@ def main() -> None:
     ap.add_argument("--focus", nargs="+", default=["FI", "SE"])
     ap.add_argument("--attractor-ratio", type=float, default=1.3,
                     help="threshold on predicted count / true count")
-    ap.add_argument("--plot-runs", nargs=2, default=["clip_vitb16_lpft_tta", "streetclip_zeroshot"],
+    # both runs with the same 3-crop TTA, so the per-country comparison is like for like
+    ap.add_argument("--plot-runs", nargs=2,
+                    default=["clip_vitb16_lpft_tta", "streetclip_zeroshot_tta"],
                     metavar=("A", "B"),
                     help="two run directories (under --results) for the dumbbell plot")
     ap.add_argument("--plot-labels", nargs=2,
-                    default=["Fine-tuned ViT-B/16 (LP-FT, TTA)", "StreetCLIP (zero-shot)"])
+                    default=["Fine-tuned ViT-B/16 (LP-FT, TTA)", "StreetCLIP (zero-shot, TTA)"])
     ap.add_argument("--plot-name", default="per_country_lpft_vs_streetclip.png")
     args = ap.parse_args()
 
@@ -273,8 +281,8 @@ def main() -> None:
         pc, rep = analyze_run(r, args.results, args.split, out, args)
         frames.append(pc)
         reports.append(rep)
-    pd.concat(frames, ignore_index=True).to_csv(out / "precision_recall.csv", index=False)
-    (out / "report.md").write_text("\n".join(reports), encoding="utf-8")
+    write_csv(pd.concat(frames, ignore_index=True), out / "precision_recall.csv")
+    (out / "report.md").write_text("\n".join(reports), encoding="utf-8", newline="\n")
     csvs = [args.results / r / f"{args.split}_per_country.csv" for r in args.plot_runs]
     if all(c.exists() for c in csvs):
         plot_dumbbell(*(pd.read_csv(c) for c in csvs), *args.plot_labels, args.split,

@@ -9,9 +9,12 @@ comparing zero-shot CLIP, a linear probe and full fine-tuning (LP-FT).
 Main result: CLIP ViT-B/16 with LP-FT reaches 0.708 top-1 on the test split with a single center crop,
 24.0 points above the zero-shot accuracy of the same backbone, and on par with StreetCLIP zero-shot
 (0.708; ViT-L/14, 336 px). Test-time augmentation (TTA, average over 3 crops) was adopted because it
-improved the val split (0.787 to 0.808); with it the model reaches 0.732 top-1 on the test split, 2.4 points
-above StreetCLIP zero-shot. That comparison is not fully fair, because StreetCLIP was evaluated without
-TTA, and StreetCLIP stays ahead on top-5 (0.958 vs. 0.935).
+improved the val split (0.787 to 0.808). With the same TTA on both models, LP-FT reaches 0.732 test top-1
+and StreetCLIP 0.726: a 0.6-point difference, inside the noise (the 95% interval of each test top-1 is
+about +-1.1 points), so the two are on par in top-1. StreetCLIP is ahead on top-5 (0.963 vs. 0.935).
+
+- **Live demo (runs in your browser):** https://huggingface.co/spaces/Daggerabuse/geoguessr-ai
+- **Model:** https://huggingface.co/Daggerabuse/geoguessr-clip-vitb16
 
 ## Why
 
@@ -27,6 +30,7 @@ is about 0.03 top-1. All numbers are read from `results/*/{test,val}_metrics.jso
 | CLIP ViT-B/16, zero-shot | 0.468 | 0.830 | 0.485 |
 | CLIP ViT-L/14, zero-shot | 0.544 | 0.903 | 0.598 |
 | StreetCLIP, zero-shot (ViT-L/14, 336 px) | 0.708 | 0.958 | 0.723 |
+| StreetCLIP, zero-shot + TTA (3 crops) | 0.726 | 0.963 | 0.752 |
 | CLIP ViT-B/16, linear probe | 0.600 | 0.900 | 0.708 |
 | CLIP ViT-B/16, LP-FT (fine-tuned) | 0.708 | 0.925 | 0.787 |
 | CLIP ViT-B/16, LP-FT + TTA (3 crops) | 0.732 | 0.935 | 0.808 |
@@ -37,9 +41,10 @@ treated as on par.
 
 TTA (average over the left, center and right crops) was chosen based on the val split: for the same
 checkpoint, evaluated with `--eval-only --tta` and no retraining, val top-1 went from 0.787 to 0.808.
-On test, top-1 is 0.732 with TTA versus 0.708 without. The TTA model is 2.4 points ahead of StreetCLIP
-zero-shot in test top-1 but behind it in top-5 (0.935 vs. 0.958). StreetCLIP was not evaluated with TTA,
-so this comparison is not fully fair.
+On test, top-1 is 0.732 with TTA versus 0.708 without. StreetCLIP was evaluated with the same 3-crop
+TTA (logits averaged): test top-1 goes from 0.708 to 0.726. With TTA on both sides, LP-FT is 0.6 points
+ahead in test top-1, while the 95% (Wilson) interval of each test top-1 is about +-1.1 points
+(n = 6600), so the two are treated as on par. In top-5, StreetCLIP is ahead (0.963 vs. 0.935).
 
 ## Findings
 
@@ -53,16 +58,17 @@ so only differences larger than 10 points are discussed below.
   test top-1 is 0.732 with TTA versus 0.708 without. It changes the confusion picture only slightly:
   SE to FI is 20 (19 without TTA), CA to US 7 (7), NG to GH 32 (32),
   US to CA 32 (34); the attractor countries are ES, TR (DK, ES without TTA).
-  The Nordic, Canada/US, unsolved-confusion and attractor counts below are for LP-FT without TTA.
+  The Nordic, Canada/US, unsolved-confusion and attractor counts below are all from runs without TTA
+  (LP-FT and StreetCLIP alike); only the per-country comparison uses TTA on both models.
 - **Nordic confusion.** Swedish images predicted as Finland (SE to FI, out of 200 per country):
   115 for B/16 zero-shot, 38 after the linear probe, 19 after LP-FT
   (119 for L/14 zero-shot, 23 for StreetCLIP). For StreetCLIP the dominant direction is
   the reverse: FI to SE is 64, versus 11 for LP-FT.
 - **Canada vs. United States.** CA to US: 38 for B/16 zero-shot, 14 after the probe,
   7 after LP-FT (150 for L/14 zero-shot, 37 for StreetCLIP).
-- **Per country, LP-FT with TTA vs. StreetCLIP (test top-1, differences > 10 points).**
-  - Fine-tuned model better (7 countries): GH (87.0% vs 42.5%, 44.5 points), FI (91.5% vs 57.5%, 34.0 points), TW (73.5% vs 45.5%, 28.0 points), PL (70.0% vs 42.5%, 27.5 points), DK (82.0% vs 57.0%, 25.0 points), ZA (84.5% vs 69.5%, 15.0 points), TH (90.5% vs 76.5%, 14.0 points).
-  - Fine-tuned model worse (7 countries): US (69.0% vs 91.0%, 22.0 points), ID (62.5% vs 84.0%, 21.5 points), IT (48.5% vs 69.0%, 20.5 points), NG (66.0% vs 85.0%, 19.0 points), BR (66.0% vs 81.5%, 15.5 points), CL (54.5% vs 65.0%, 10.5 points), JP (83.5% vs 93.5%, 10.0 points).
+- **Per country, LP-FT vs. StreetCLIP, both with the same 3-crop TTA (test top-1, differences > 10 points).**
+  - Fine-tuned model better (7 countries): GH (87.0% vs 40.0%, 47.0 points), FI (91.5% vs 56.5%, 35.0 points), TW (73.5% vs 44.0%, 29.5 points), PL (70.0% vs 43.0%, 27.0 points), DK (82.0% vs 63.0%, 19.0 points), ZA (84.5% vs 72.0%, 12.5 points), TH (90.5% vs 78.5%, 12.0 points).
+  - Fine-tuned model worse (8 countries): IT (48.5% vs 73.5%, 25.0 points), ID (62.5% vs 86.5%, 24.0 points), US (69.0% vs 92.5%, 23.5 points), NG (66.0% vs 86.5%, 20.5 points), CL (54.5% vs 71.5%, 17.0 points), BR (66.0% vs 81.5%, 15.5 points), RU (68.5% vs 82.0%, 13.5 points), JP (83.5% vs 96.5%, 13.0 points).
   - All other countries differ by 10 points or less, which is within the noise level here.
 - **Confusions that were not solved, only changed direction.** GH to NG fell from 108 to 6
   while NG to GH is 32 after LP-FT (it was 24 for B/16 zero-shot). US to CA is
@@ -74,10 +80,11 @@ so only differences larger than 10 points are discussed below.
 
 ### Figures
 
-Per-country test top-1 of the fine-tuned ViT-B/16 (LP-FT, with TTA) and StreetCLIP zero-shot, sorted by the
-difference between them. Differences smaller than about 7 points are within the 95% interval.
+Per-country test top-1 of the fine-tuned ViT-B/16 (LP-FT) and StreetCLIP zero-shot, both with the
+same 3-crop TTA, sorted by the difference between them. Differences smaller than about 7 points are
+within the 95% interval.
 
-![Per-country test top-1: LP-FT with TTA vs. StreetCLIP](results/analysis/per_country_lpft_vs_streetclip.png)
+![Per-country test top-1: LP-FT with TTA vs. StreetCLIP zero-shot with TTA](results/analysis/per_country_lpft_vs_streetclip.png)
 
 Test confusion matrices of the same backbone before and after fine-tuning (rows are the true
 country, columns the predicted one, each row normalized):
@@ -89,13 +96,35 @@ country, columns the predicted one, each row normalized):
 
 Left: CLIP ViT-B/16 zero-shot. Right: CLIP ViT-B/16 LP-FT.
 
+## Demo
+
+[Live demo](https://huggingface.co/spaces/Daggerabuse/geoguessr-ai) (a static Hugging Face Space, `web/`).
+The fine-tuned model (vision encoder + head, one graph, 33 logits) is exported to ONNX
+(`export_onnx`) and runs in the browser with onnxruntime-web, so the photo never leaves the device.
+Preprocessing is the same as in evaluation (short side 224 with PIL's bicubic reimplemented in JS,
+left/center/right crops, no flips); a test checks that the JS and Python outputs are identical.
+
+The demo uses 8-bit weights (MatMulNBits, blocks of 32; activations stay fp32), 101 MB instead of
+346 MB. Activation quantization (`quantize_dynamic`) was tried first and dropped: top-1 agreement
+with PyTorch fell to 0.82-0.85 on the 500 images used for choosing the method. Agreement with the
+PyTorch model (3-crop TTA), measured on 2500 other images from `data/sample`
+(`results/onnx_parity/`):
+
+| | fp32 ONNX | 8-bit ONNX |
+|---|---|---|
+| Top-1 agreement, onnxruntime (2500 images) | 1.000 | 0.986 |
+| Max logit difference, onnxruntime | 1e-4 | 0.27 |
+| Top-1 agreement in the browser (Edge, onnxruntime-web) | 1.000 (100 images) | 0.995 (200 images) |
+
+These are agreement numbers, not accuracy. Details: [NOTES_ONNX.md](NOTES_ONNX.md).
+
 ## Limitations
 
 - Single run with a single seed; the variance of training itself is unknown.
 - The 33 countries do not represent the world, and the numbers are not comparable to published
   OSV-5M benchmark results (different country set and metrics).
 - StreetCLIP is a larger model (ViT-L/14) at a higher resolution (336 px) than the fine-tuned ViT-B/16,
-  and it is evaluated zero-shot (and without TTA), while the fine-tuned model was trained on this country set.
+  and it is evaluated zero-shot, while the fine-tuned model was trained on this country set.
 - TTA was selected on the val split, which is optimistic (see below); the test gain is a single measurement.
 - Val is split from the same pool as train (by sequence), so it is optimistic: the val-test gap is
   7.8 points for LP-FT, versus 1.5 for StreetCLIP and 1.6 for B/16 zero-shot. Compare models on test.
@@ -180,12 +209,19 @@ from kaggle_secrets import UserSecretsClient
 os.environ["HF_WRITE_TOKEN"] = UserSecretsClient().get_secret("HF_WRITE_TOKEN")
 ```
 
-### Demo (Hugging Face Space)
+### Demo
 
-`app/` is a Gradio Space (CPU): it loads the exported model from the Hub (`MODEL_REPO`,
-default `Daggerabuse/geoguessr-clip-vitb16`) and shows the top-5 countries with 3-crop TTA.
-Create a Gradio Space and upload the contents of `app/` (`app.py`, `inference.py`,
-`requirements.txt`, `README.md`) to its root.
+```
+# ONNX export (fp32 + 8-bit) of the Hub model, with a parity check against PyTorch
+uv sync --extra ml --extra onnx
+uv run python -m geoguessr_ai.export_onnx --model models/hf_export --out models/onnx \
+    --verify data/sample/images --offset 500 --report results/onnx_parity/report.json
+# serve web/ locally with the local model: http://localhost:8000/web/?base=/model/
+uv run python -m geoguessr_ai.webdemo serve
+```
+
+`app/` (a Gradio version of the demo) is kept but not used: Hugging Face Gradio Spaces require a
+paid plan, so the live demo is the static page in `web/`.
 
 ## Tests
 
@@ -219,14 +255,12 @@ Evaluation: short side 224 + center crop; `--tta` averages left/center/right cro
 ## Future work
 
 - Split val by creator (not only by sequence) to reduce the val-test gap.
-- Evaluate StreetCLIP with TTA, for an equal comparison.
 - Linear probe on StreetCLIP.
 - More images per country.
-- A demo on Hugging Face Spaces.
 
 ## License
 
-- Code: Code: MIT, see [LICENSE](LICENSE).
+- Code: MIT, see [LICENSE](LICENSE).
 - Data: [OpenStreetView-5M](https://huggingface.co/datasets/osv5m/osv5m), **CC BY-SA 4.0**.
   Astruc et al., "OpenStreetView-5M: The Many Roads to Global Visual Geolocation", CVPR 2024.
 - Models: [openai/clip-vit-large-patch14](https://huggingface.co/openai/clip-vit-large-patch14),
