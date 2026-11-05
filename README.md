@@ -149,6 +149,9 @@ python -m geoguessr_ai.baseline_clip --root /kaggle/working/subset \
 # same backbone as the fine-tuned model (fair comparison)
 python -m geoguessr_ai.baseline_clip --root /kaggle/working/subset \
     --model openai/clip-vit-base-patch16 --out results/clip_vitb16_zeroshot
+# StreetCLIP with the same 3-crop TTA as train.py --tta (logits averaged)
+python -m geoguessr_ai.baseline_clip --root /kaggle/working/subset \
+    --model geolocal/StreetCLIP --tta --out results/streetclip_zeroshot_tta
 
 # 3. fine-tuning: quick check with a tiny random model (no download), then the real run
 python -m geoguessr_ai.train --root /kaggle/working/subset --smoke
@@ -159,7 +162,30 @@ python -m geoguessr_ai.train --root /kaggle/working/subset --eval-only --checkpo
 
 # 4. confusion analysis of every run under results/ (writes results/analysis/)
 python -m geoguessr_ai.analyze
+
+# 5. export to Hugging Face: vision encoder + head (safetensors), classes.json,
+#    inference_config.json and a model card with the test results from results/.
+#    Check the files first, then push (needs a write token in HF_WRITE_TOKEN)
+python -m geoguessr_ai.export_hf --checkpoint <path to best.pt> --out /kaggle/working/hf_export
+python -m geoguessr_ai.export_hf --checkpoint <path to best.pt> --out /kaggle/working/hf_export_push \
+    --push Daggerabuse/geoguessr-clip-vitb16
 ```
+
+The output folder must be empty (it is uploaded as a whole). The repo is created as public;
+add `--private` for a private one. On Kaggle, store the token as a secret and set the
+environment variable in the notebook (never print it):
+```python
+import os
+from kaggle_secrets import UserSecretsClient
+os.environ["HF_WRITE_TOKEN"] = UserSecretsClient().get_secret("HF_WRITE_TOKEN")
+```
+
+### Demo (Hugging Face Space)
+
+`app/` is a Gradio Space (CPU): it loads the exported model from the Hub (`MODEL_REPO`,
+default `Daggerabuse/geoguessr-clip-vitb16`) and shows the top-5 countries with 3-crop TTA.
+Create a Gradio Space and upload the contents of `app/` (`app.py`, `inference.py`,
+`requirements.txt`, `README.md`) to its root.
 
 ## Tests
 

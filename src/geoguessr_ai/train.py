@@ -33,6 +33,7 @@ from geoguessr_ai.baseline_clip import (
     DEFAULT_TEMPLATE,
     as_embedding,
     build_prompts,
+    eval_crops,
     evaluate,
     library_versions,
     write_split_results,
@@ -55,23 +56,9 @@ def to_tensor_array(im: Image.Image) -> np.ndarray:
     return ((x - CLIP_MEAN) / CLIP_STD).transpose(2, 0, 1).copy()
 
 
-def resize_short(im: Image.Image, size: int) -> Image.Image:
-    w, h = im.size
-    s = size / min(w, h)
-    return im.resize((max(size, round(w * s)), max(size, round(h * s))), Image.BICUBIC)
-
-
 def eval_views(im: Image.Image, size: int, tta: bool) -> list[np.ndarray]:
-    """Short side `size` + center crop. tta: left/center/right (top/center/bottom) along the long axis."""
-    im = resize_short(im, size)
-    w, h = im.size
-    if w >= h:
-        offs = [(0, 0), ((w - size) // 2, 0), (w - size, 0)] if tta else [((w - size) // 2, 0)]
-        offs = [(x, (h - size) // 2) for x, _ in offs]
-    else:
-        offs = [(0, 0), (0, (h - size) // 2), (0, h - size)] if tta else [(0, (h - size) // 2)]
-        offs = [((w - size) // 2, y) for _, y in offs]
-    return [to_tensor_array(im.crop((x, y, x + size, y + size))) for x, y in offs]
+    """Normalized arrays of eval_crops: center crop, or left/center/right with tta."""
+    return [to_tensor_array(c) for c in eval_crops(im, size, tta)]
 
 
 def train_view(

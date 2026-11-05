@@ -133,3 +133,62 @@ def test_baseline_run_end_to_end_with_missing_image(subset_root, tmp_path):
     assert cfg["prompts"][0] == "A street view photo taken in Australia."
     cm = pd.read_csv(tmp_path / "out" / "test_confusion.csv", index_col=0)
     assert cm.to_numpy().sum() == 8
+
+
+# --- TTA (left/center/right crops, logits averaged as in train.py)
+
+
+def test_mean_over_views_averages_consecutive_rows():
+    logits = np.arange(12, dtype=float).reshape(6, 2)  # 2 images x 3 views
+    m = b.mean_over_views(logits, 3)
+    assert m.shape == (2, 2)
+    assert m.tolist() == [[2.0, 3.0], [8.0, 9.0]]
+    with pytest.raises(ValueError):
+        b.mean_over_views(np.zeros((4, 2)), 3)
+
+
+class CountingEncoder(FakeEncoder):
+    image_size = 32
+
+    def __init__(self):
+        super().__init__()
+        self.sizes = []
+
+    def encode_images(self, images):
+        self.sizes += [im.size for im in images]
+        return super().encode_images(images)
+
+
+def _args(root, out, **kw):
+    a = b.parse_args(["--root", str(root), "--out", str(out), "--batch-size", "4",
+                      "--workers", "2", "--model", "fake"])
+    for k, v in kw.items():
+        setattr(a, k, v)
+    return a
+
+
+def test_baseline_tta_encodes_three_crops_per_image(subset_root, tmp_path):
+    enc = CountingEncoder()
+    res = b.run(_args(subset_root, tmp_path / "out", tta=True), enc=enc)
+    n_images = res["test"]["n"] + res["val"]["n"]
+    assert (res["test"]["n"], res["val"]["n"]) == (9, 9)
+    assert len(enc.sizes) == 3 * n_images
+    assert set(enc.sizes) == {(32, 32)}  # crops at the encoder's image size
+    cfg = json.loads((tmp_path / "out" / "run_config.json").read_text())
+    assert cfg["tta"] is True and cfg["image_size"] == 32
+
+
+def test_baseline_without_tta_passes_full_images(subset_root, tmp_path):
+    enc = CountingEncoder()
+    res = b.run(_args(subset_root, tmp_path / "out"), enc=enc)
+    assert len(enc.sizes) == res["test"]["n"] + res["val"]["n"]
+    assert set(enc.sizes) == {(96, 64)}  # untouched: the processor does resize + crop
+    assert json.loads((tmp_path / "out" / "run_config.json").read_text())["tta"] is False
+
+
+def test_baseline_cli_defaults_are_unchanged():
+    a = b.parse_args([])
+    assert not a.tta
+    assert a.out == "results/clip_zeroshot" and a.root == "data/subset"
+    assert a.model == b.DEFAULT_MODEL and a.template == b.DEFAULT_TEMPLATE
+    assert (a.splits, a.batch_size, a.workers, a.seed) == (["test", "val"], 128, 4, 42)

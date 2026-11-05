@@ -8,6 +8,12 @@ Usage (Kaggle):
   python -m geoguessr_ai.baseline_clip --root /kaggle/working/subset
   python -m geoguessr_ai.baseline_clip --root ... --model geolocal/StreetCLIP \\
       --out results/streetclip_zeroshot
+  python -m geoguessr_ai.baseline_clip --root ... --model geolocal/StreetCLIP --tta \\
+      --out results/streetclip_zeroshot_tta
+
+--tta averages the logits of the left/center/right crops (the same crops as
+train.py --tta, at the model's own image size); without it, the CLIPProcessor's
+resize + center crop is used.
 
 Any HF CLIP model loadable with CLIPModel/CLIPProcessor works via --model.
 The StreetCLIP model card recommends no template; the default template is used.
@@ -105,6 +111,36 @@ def confusion(labels: np.ndarray, pred: np.ndarray, n_classes: int) -> np.ndarra
     return cm
 
 
+def mean_over_views(logits: np.ndarray, n_views: int) -> np.ndarray:
+    """(N*V, C) logits, views of one image consecutive -> (N, C) mean over the V views."""
+    if logits.shape[0] % n_views:
+        raise ValueError(f"{logits.shape[0]} rows are not a multiple of n_views={n_views}")
+    return logits.reshape(-1, n_views, logits.shape[-1]).mean(axis=1)
+
+
+# ----------------------------------------------------------------- crops
+# Shared with train.py (eval_views). No flips: the driving side is a country cue.
+
+
+def resize_short(im: Image.Image, size: int) -> Image.Image:
+    w, h = im.size
+    s = size / min(w, h)
+    return im.resize((max(size, round(w * s)), max(size, round(h * s))), Image.BICUBIC)
+
+
+def eval_crops(im: Image.Image, size: int, tta: bool) -> list[Image.Image]:
+    """Short side `size` + center crop. tta: left/center/right (top/center/bottom) along the long axis."""
+    im = resize_short(im, size)
+    w, h = im.size
+    if w >= h:
+        offs = [(0, 0), ((w - size) // 2, 0), (w - size, 0)] if tta else [((w - size) // 2, 0)]
+        offs = [(x, (h - size) // 2) for x, _ in offs]
+    else:
+        offs = [(0, 0), (0, (h - size) // 2), (0, h - size)] if tta else [(0, (h - size) // 2)]
+        offs = [((w - size) // 2, y) for _, y in offs]
+    return [im.crop((x, y, x + size, y + size)) for x, y in offs]
+
+
 # ----------------------------------------------------------------- model
 
 
@@ -152,6 +188,7 @@ class HFClip:
         self.processor = CLIPProcessor.from_pretrained(name)
         self.logit_scale = self.model.logit_scale.exp().item()
         self.proj_dim = self.model.config.projection_dim
+        self.image_size = self.model.config.vision_config.image_size
 
     def encode_texts(self, texts: list[str]) -> np.ndarray:
         with self.torch.no_grad():
@@ -175,8 +212,11 @@ def _open(path: Path):
         return None
 
 
-def image_logits(enc, text_emb, paths, batch_size, workers):
+def image_logits(enc, text_emb, paths, batch_size, workers, tta: bool = False):
     """Image embeddings in batches -> logits; unreadable images are skipped.
+
+    tta: each image becomes 3 crops (left/center/right, see eval_crops) at the
+    encoder's image size; the logits of the 3 crops are averaged (as in train.py).
 
     Returns: (logits, valid_mask)
     """
@@ -188,7 +228,11 @@ def image_logits(enc, text_emb, paths, batch_size, workers):
             ims = list(ex.map(_open, chunk))
             good = [i for i, im in enumerate(ims) if im is not None]
             ok[[s + i for i in good]] = True
-            if good:
+            if good and tta:
+                views = [v for i in good for v in eval_crops(ims[i], enc.image_size, True)]
+                emb = normalize(enc.encode_images(views))
+                rows.append(mean_over_views(enc.logit_scale * emb @ text_emb.T, 3))
+            elif good:
                 emb = normalize(enc.encode_images([ims[i] for i in good]))
                 rows.append(enc.logit_scale * emb @ text_emb.T)
             print(f"  {min(s + batch_size, len(paths))}/{len(paths)}", end="\r", flush=True)
@@ -266,10 +310,11 @@ def write_split_results(
     return metrics
 
 
-def run_split(enc, text_emb, df, classes, root, split, out, batch_size, workers) -> dict:
+def run_split(enc, text_emb, df, classes, root, split, out, batch_size, workers,
+              tta: bool = False) -> dict:
     sub = df[df["split"] == split].reset_index(drop=True)
     paths = [root / p for p in sub["path"]]
-    logits, ok = image_logits(enc, text_emb, paths, batch_size, workers)
+    logits, ok = image_logits(enc, text_emb, paths, batch_size, workers, tta=tta)
     n_missing = int((~ok).sum())
     if n_missing:
         print(f"WARNING [{split}]: {n_missing} images could not be read, skipped")
@@ -291,6 +336,7 @@ def run(args: argparse.Namespace, enc=None) -> dict:
     print("Example prompts:", prompts[:3])
     text_emb = normalize(enc.encode_texts(prompts))
 
+    tta = getattr(args, "tta", False)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     (out / "run_config.json").write_text(
@@ -299,6 +345,8 @@ def run(args: argparse.Namespace, enc=None) -> dict:
                 "model": args.model,
                 "template": args.template,
                 "seed": args.seed,
+                "tta": tta,
+                "image_size": getattr(enc, "image_size", None),
                 "device": getattr(enc, "device", "n/a"),
                 "versions": library_versions(),
                 "classes": classes,
@@ -308,13 +356,12 @@ def run(args: argparse.Namespace, enc=None) -> dict:
         )
     )
     return {
-        s: run_split(enc, text_emb, df, classes, root, s, out, args.batch_size, args.workers)
+        s: run_split(enc, text_emb, df, classes, root, s, out, args.batch_size, args.workers, tta)
         for s in args.splits
     }
 
 
-def main() -> None:
-    sys.stdout.reconfigure(encoding="utf-8")
+def parse_args(argv=None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--root", default="data/subset")
     ap.add_argument("--out", default="results/clip_zeroshot")
@@ -324,7 +371,14 @@ def main() -> None:
     ap.add_argument("--batch-size", type=int, default=128)
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--seed", type=int, default=42)
-    run(ap.parse_args())
+    ap.add_argument("--tta", action="store_true",
+                    help="average the logits of 3 crops: left/center/right (as train.py --tta)")
+    return ap.parse_args(argv)
+
+
+def main() -> None:
+    sys.stdout.reconfigure(encoding="utf-8")
+    run(parse_args())
 
 
 if __name__ == "__main__":

@@ -48,3 +48,15 @@ def test_eval_views_portrait_and_square_inputs():
     square = Image.fromarray(np.zeros((64, 64, 3), np.uint8))
     assert len(t.eval_views(square, 32, tta=True)) == 3
     t.train_view(square, 32, np.random.default_rng(0))  # must not raise
+
+
+def test_eval_views_are_the_normalized_eval_crops():
+    from geoguessr_ai.baseline_clip import eval_crops
+
+    im = gradient_image()
+    for tta in (False, True):
+        crops = eval_crops(im, 224, tta)
+        views = t.eval_views(im, 224, tta)
+        assert [c.size for c in crops] == [(224, 224)] * len(views)
+        for c, v in zip(crops, views):
+            assert (t.to_tensor_array(c) == v).all()
