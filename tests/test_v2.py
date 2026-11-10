@@ -208,14 +208,24 @@ def test_cache_roundtrip_source_separation_and_temp_files(tmp_path):
     assert e.cached_ids(tmp_path, "train") == {"1", "2"} and e.cached_ids(tmp_path, "test") == {"1"}
     emb, found = e.load_embeddings(tmp_path, ["2", "x", "1"], "train")
     assert found.tolist() == [True, False, True] and emb[2].tolist() == [1, 0, 0]
-    assert e.load_embeddings(tmp_path, ["1"], "test")[0][0].tolist() == [1, 1, 1]  # not the train row
+    np.testing.assert_allclose(e.load_embeddings(tmp_path, ["1"], "test")[0][0], 3 ** -0.5)  # not the train row
+
+
+def test_load_embeddings_undoes_the_fp16_norm_error(tmp_path):
+    v = np.random.default_rng(0).normal(size=(50, 512))
+    v /= np.linalg.norm(v, axis=1, keepdims=True)
+    e.save_npz(tmp_path / "train_00_r.npz", [str(i) for i in range(50)], v, failed=[])
+    stored = np.load(tmp_path / "train_00_r.npz")["emb"].astype(np.float32)
+    assert np.abs(np.linalg.norm(stored, axis=1) - 1).max() > 1e-5  # fp16 rounding moved the norm
+    emb, _ = e.load_embeddings(tmp_path, [str(i) for i in range(50)], "train")
+    np.testing.assert_allclose(np.linalg.norm(emb, axis=1), 1, atol=1e-6)
 
 
 def test_duplicates_resolve_to_first_file_deterministically(tmp_path, capsys):
-    e.save_npz(tmp_path / "train_00_a.npz", ["1"], np.zeros((1, 2)), failed=[])
-    e.save_npz(tmp_path / "train_00_b.npz", ["1"], np.ones((1, 2)), failed=[])
+    e.save_npz(tmp_path / "train_00_a.npz", ["1"], np.array([[1.0, 0.0]]), failed=[])
+    e.save_npz(tmp_path / "train_00_b.npz", ["1"], np.array([[0.0, 1.0]]), failed=[])
     emb, _ = e.load_embeddings(tmp_path, ["1"], "train")
-    assert emb[0].tolist() == [0, 0] and "more than one file" in capsys.readouterr().out
+    assert emb[0].tolist() == [1, 0] and "more than one file" in capsys.readouterr().out
 
 
 def test_publish_once_never_overwrites_when_the_race_is_lost(tmp_path, monkeypatch):
@@ -341,6 +351,7 @@ def test_dual_limit_matches_single_run_and_check_verifies_it(zips):
     assert sum(s["images"] for s in stats) == 25 and all(s["target"] == 25 for s in stats)
     res = _check(root, dual, "--limit", "25", "--reference", str(single))
     assert res["ok"] and res["unique"] == res["compared"] == 25 and res["max_abs_diff"] == 0.0
+    assert res["min_cosine"] == pytest.approx(1.0, abs=1e-6)  # true cosine, not the fp16 norm
     # a duplicated file, or a cache checked against the wrong target, fails the check
     f = e.cache_files(dual, "train")[0]
     f.with_name(f.name.replace(".npz", "_copy.npz")).write_bytes(f.read_bytes())

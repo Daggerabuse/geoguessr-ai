@@ -95,7 +95,7 @@ def cached_ids(out: Path, source: str) -> set[str]:
 
 
 def load_embeddings(out: Path, ids, source: str) -> tuple[np.ndarray, np.ndarray]:
-    """(len(ids), D) float32 rows aligned with ids (zeros where missing) and a found mask."""
+    """(len(ids), D) float32 unit rows aligned with ids (zeros where missing), a found mask."""
     pos = {str(i): j for j, i in enumerate(ids)}
     emb, found, dup = None, np.zeros(len(pos), dtype=bool), 0
     for f in cache_files(out, source):
@@ -113,6 +113,8 @@ def load_embeddings(out: Path, ids, source: str) -> tuple[np.ndarray, np.ndarray
         raise FileNotFoundError(f"none of the {len(pos)} {source} ids are embedded in {out}")
     if dup:
         print(f"WARNING: {dup} {source} ids are in more than one file in {out}; kept the first")
+    # fp16 storage rounds the unit norm by up to ~1e-3; renormalize so dot product == cosine
+    emb[found] /= np.linalg.norm(emb[found], axis=1, keepdims=True)
     return emb, found
 
 
