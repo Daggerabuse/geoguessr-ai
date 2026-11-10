@@ -1,17 +1,20 @@
 """Local-zip pipeline: zipq downloader + markers, embed.py consumer mode, FT image archive."""
 
 import hashlib
+import io
 import json
 import shutil
-import sys
 import threading
 import time
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
+import httpx2
 import numpy as np
 import pandas as pd
 import pytest
+from huggingface_hub.errors import HfHubHTTPError
 
 from geoguessr_ai import embed as e
 from geoguessr_ai import ft_archive as fa
@@ -287,7 +290,8 @@ def test_pack_redoes_a_cut_off_part_and_never_duplicates_a_chunk(hub, monkeypatc
     assert (out / "part_000.zip").exists() and not (out / "part_000.csv").exists()
     monkeypatch.undo()
     fa.pack(staging, out, 1.0, final=True)  # the uncommitted part is redone
-    assert sorted(p.name for p in out.glob("part_*")) == ["part_000.csv", "part_000.zip"]
+    assert sorted(p.name for p in out.glob("part_*")) == ["part_000.csv", "part_000.sha256",
+                                                          "part_000.zip"]
     for name, data in backup.items():  # crash after the commit, before the chunks were removed
         (staging / name).write_bytes(data)
     fa.pack(staging, out, 1.0, final=True)
@@ -309,71 +313,170 @@ def test_pack_refuses_staged_bytes_that_differ_from_the_source(hub):
         fa.pack(staging, root / "ft", 1.0, final=True)
 
 
-FAKE_KAGGLE = """
-import json, os, sys
-state = os.environ["FAKE_STATE"]
-calls = json.load(open(state)) if os.path.exists(state) else []
-calls.append(sys.argv[1:])
-json.dump(calls, open(state, "w"))
-print("auth with key", os.environ["KAGGLE_KEY"])  # a CLI that leaks the key
-sys.stderr.write("debug: " + os.environ["KAGGLE_KEY"] + "\\n")
-exists = os.environ.get("FAKE_EXISTS") == "1" or any(c[1] == "create" for c in calls[:-1])
-if sys.argv[2] == "version":
-    if not exists:
-        print("404 Client Error: Not Found for url: .../datasets/someone/x")
-        sys.exit(1)
-    versions = sum(c[1] == "version" for c in calls)
-    sys.exit(1 if os.environ.get("FAKE_FLAKY") == "1" and versions == 1 else 0)
-sys.exit(1 if exists else 0)  # create
-"""
+class FakeHfApi:
+    """huggingface_hub.HfApi stand-in: files in a dict; `fail` = errors upload_file raises first."""
+
+    def __init__(self, private=True, fail=()):
+        self.private, self.fail = private, list(fail)
+        self.files: dict[str, bytes] = {}
+        self.calls: list[tuple] = []
+
+    def create_repo(self, repo_id, *, repo_type, private, exist_ok):
+        self.calls.append(("create_repo", repo_id, repo_type, private, exist_ok))
+
+    def repo_info(self, repo_id, *, repo_type):
+        return SimpleNamespace(private=self.private)
+
+    def get_paths_info(self, repo_id, paths, *, repo_type):
+        return [SimpleNamespace(path=q, lfs=SimpleNamespace(sha256=hashlib.sha256(self.files[q]).hexdigest()))
+                for q in paths if q in self.files]
+
+    def upload_file(self, *, path_or_fileobj, path_in_repo, repo_id, repo_type, commit_message):
+        self.calls.append(("upload_file", path_in_repo))
+        if self.fail:
+            raise self.fail.pop(0)
+        self.files[path_in_repo] = Path(path_or_fileobj).read_bytes()
+
+    def uploads(self):
+        return [c[1] for c in self.calls if c[0] == "upload_file"]
 
 
-def test_upload_is_private_retried_and_never_leaks_the_key(tmp_path, monkeypatch, capsys):
-    key = "kgl-SECRET-0123456789"
-    monkeypatch.setenv("KAGGLE_USERNAME", "someone")
-    monkeypatch.setenv("KAGGLE_KEY", key)
-    monkeypatch.setenv("FAKE_STATE", str(tmp_path / "calls.json"))
-    (tmp_path / "fake_kaggle.py").write_text(FAKE_KAGGLE)
-    out = tmp_path / "ft"
-    out.mkdir()
-    (out / "manifest.csv").write_text("id\n")
-    log = tmp_path / "upload.log"
-    ok = fa.upload(out, "osv5m-ft-pilot", "t", [sys.executable, str(tmp_path / "fake_kaggle.py")],
-                   retries=2, backoff=0, log_path=log)
-    assert ok
-    calls = json.loads((tmp_path / "calls.json").read_text())
-    assert [c[1] for c in calls] == ["version", "create"]  # not found -> create
-    assert not any("--public" in c for c in calls)
+def _http_error(code: int, msg: str = "") -> HfHubHTTPError:
+    req = httpx2.Request("POST", "https://huggingface.co/api/datasets/u/x")
+    return HfHubHTTPError(f"{code} Client Error {msg}", response=httpx2.Response(code, request=req))
+
+
+TOKEN = "hf_SECRETtoken0123456789"
+
+
+@pytest.fixture
+def hf(monkeypatch):
+    api = FakeHfApi()
+    monkeypatch.setenv("HF_TOKEN", TOKEN)
+    monkeypatch.setattr(fa, "HfApi", lambda token: api)
+    return api
+
+
+def _archive(root: Path) -> Path:
+    """3 committed parts (one per shard) and manifest.csv in root/ft."""
+    staging, out = root / "staging", root / "ft"
+    staging.mkdir()
+    for s in range(N_SHARDS):
+        items = sorted(z.index_zip(root / "hub" / "train" / f"{s:02d}.zip").items())
+        fa.stage_shard(_hub_opener(root), "train", s, items, staging)
+    fa.pack(staging, out, 1e-6, final=True)
+    return out
+
+
+def _upload(out: Path, *extra: str):
+    fa.main(["upload", "--out", str(out), "--repo", "u/x-pilot", "--backoff", "0", *extra])
+
+
+def test_hf_upload_is_private_verified_deletes_parts_and_sends_the_manifest_last(hub, hf, capsys):
+    out = _archive(hub[0])
+    shas = {c.with_suffix(".zip").name: c.with_suffix(".sha256").read_text().strip()
+            for c in out.glob("part_*.csv")}
+    assert len(shas) == 3
+    log = hub[0] / "upload.log"
+    _upload(out, "--log", str(log))
+    assert hf.calls[0] == ("create_repo", "u/x-pilot", "dataset", True, True)
+    assert hf.uploads()[-1] == "manifest.csv"
+    for name, sha in shas.items():
+        assert hashlib.sha256(hf.files[name]).hexdigest() == sha
+        assert hf.files[name.replace(".zip", ".sha256")].decode().strip() == sha
+    assert not list(out.glob("part_*.zip"))  # deleted after the upload was checked
+    assert len(list(out.glob("part_*.csv"))) == len(list(out.glob("part_*.sha256"))) == 3
+    assert "private=True" in log.read_text()
     printed = capsys.readouterr()
-    for text in (printed.out, printed.err, log.read_text(), (out / "dataset-metadata.json").read_text()):
-        assert key not in text
-    assert "***" in log.read_text()
-    assert json.loads((out / "dataset-metadata.json").read_text())["id"] == "someone/osv5m-ft-pilot"
-    assert not list(tmp_path.rglob("kaggle.json"))
+    assert TOKEN not in printed.out + printed.err + log.read_text()
 
 
-def test_upload_versions_an_existing_dataset_and_retries_other_errors(tmp_path, monkeypatch):
-    monkeypatch.setenv("KAGGLE_USERNAME", "someone")
-    monkeypatch.setenv("KAGGLE_KEY", "k3y-value")
-    monkeypatch.setenv("FAKE_STATE", str(tmp_path / "calls.json"))
-    monkeypatch.setenv("FAKE_EXISTS", "1")
-    monkeypatch.setenv("FAKE_FLAKY", "1")  # first version fails with a non-404 error
-    (tmp_path / "fake_kaggle.py").write_text(FAKE_KAGGLE)
-    out = tmp_path / "ft"
-    out.mkdir()
-    (out / "manifest.csv").write_text("id\n")
-    assert fa.upload(out, "x-pilot", "t", [sys.executable, str(tmp_path / "fake_kaggle.py")],
-                     retries=2, backoff=0)
-    calls = json.loads((tmp_path / "calls.json").read_text())
-    assert [c[1] for c in calls] == ["version", "version"]  # retried, never create, never public
-    assert not any("--public" in c for c in calls)
+def test_hf_upload_refuses_a_repo_that_is_not_private(hub, hf):
+    out = _archive(hub[0])
+    hf.private = False
+    with pytest.raises(SystemExit, match="not private"):
+        _upload(out)
+    assert hf.uploads() == [] and len(list(out.glob("part_*.zip"))) == 3
 
 
-def test_upload_requires_credentials_from_the_environment(tmp_path, monkeypatch):
-    monkeypatch.delenv("KAGGLE_KEY", raising=False)
-    monkeypatch.setenv("KAGGLE_USERNAME", "someone")
-    with pytest.raises(SystemExit, match="KAGGLE_KEY"):
-        fa.upload(tmp_path, "x", "t", ["kaggle"], 0, 0)
+def test_hf_upload_resume_skips_parts_already_in_the_repo(hub, hf):
+    out = _archive(hub[0])
+    hf.files["part_000.zip"] = (out / "part_000.zip").read_bytes()  # uploaded before a crash
+    _upload(out)
+    assert "part_000.zip" not in hf.uploads() and "part_001.zip" in hf.uploads()
+    assert not (out / "part_000.zip").exists()
+    hf.calls.clear()
+    _upload(out)  # everything is there: only the manifest is sent again
+    assert hf.uploads() == ["manifest.csv"]
+
+
+def test_hf_upload_fails_fast_on_403_and_never_logs_the_token(hub, hf, capsys):
+    out = _archive(hub[0])
+    hf.fail = [_http_error(403, f"Forbidden (token {TOKEN})")]
+    log = hub[0] / "upload.log"
+    with pytest.raises(SystemExit) as e:
+        _upload(out, "--log", str(log))
+    assert hf.uploads() == ["part_000.zip"]  # one attempt, no retry
+    assert (out / "part_000.zip").exists() and not hf.files
+    msg = str(e.value.code)
+    assert "403" in msg and "***" in msg and TOKEN not in msg
+    printed = capsys.readouterr()
+    assert TOKEN not in printed.out + printed.err + log.read_text()
+
+
+def test_hf_upload_retries_5xx_429_and_network_errors(hub, hf):
+    out = _archive(hub[0])
+    hf.fail = [_http_error(503), _http_error(429), ConnectionError("reset")]
+    _upload(out)
+    assert hf.uploads()[:4] == ["part_000.zip"] * 4 and "manifest.csv" in hf.files
+    assert fa.transient(_http_error(500)) and not fa.transient(_http_error(401))
+    assert not fa.transient(_http_error(404)) and not fa.transient(ValueError())
+
+
+def test_hf_upload_needs_hf_token_from_the_environment(tmp_path, monkeypatch):
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    with pytest.raises(SystemExit, match="HF_TOKEN"):
+        fa.main(["upload", "--out", str(tmp_path), "--repo", "u/x-pilot"])
+
+
+def test_consume_uploads_each_part_as_it_is_made(hub, hf):
+    root, ids, fetch, _ = hub
+    pd.DataFrame({"id": ids, "nat_rank": range(len(ids))}).to_csv(root / "train.csv", index=False)
+    t, box, _ = _downloader(root, fetch, ["ft_archive"])
+    out = root / "ft"
+    fa.main(["consume", "--ids", str(root / "train.csv"), "--zip-dir", str(root / "zips"),
+             "--index-dir", str(root / "index"), "--shards", "0", "1", "2", "--poll", "0.01",
+             "--staging", str(root / "staging"), "--out", str(out), "--part-gb", "1e-6",
+             "--repo", "u/x-pilot", "--backoff", "0"])
+    t.join(60)
+    assert "err" not in box
+    assert hf.uploads()[-1] == "manifest.csv" and not list(out.glob("part_*.zip"))
+    m = pd.read_csv(out / "manifest.csv", dtype={"id": str})
+    assert set(m["id"]) == set(ids)
+    src = _hub_bytes(root)
+    for part in m["part"].unique():
+        with zipfile.ZipFile(io.BytesIO(hf.files[part])) as zf:
+            assert all(zf.read(i) == src[Path(i.filename).stem] for i in zf.infolist())
+
+
+def test_smoke_uploads_two_parts_verifies_the_download_and_reruns_without_reuploading(
+        tmp_path, hf, monkeypatch, capsys):
+    def download(repo, path, *, repo_type, token, local_dir):
+        dst = Path(local_dir) / path
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(hf.files[path])
+        return str(dst)
+
+    monkeypatch.setattr(fa, "hf_hub_download", download)
+    with pytest.raises(SystemExit, match="pilot"):
+        fa.main(["smoke", "--repo", "u/osv5m-ft-archive", "--work", str(tmp_path / "w")])
+    fa.main(["smoke", "--repo", "u/x-pilot", "--work", str(tmp_path / "w")])
+    assert sorted(f for f in hf.files if f.endswith(".zip")) == [
+        "smoke/part_000.zip", "smoke/part_001.zip"]
+    assert "SMOKE OK" in capsys.readouterr().out
+    hf.calls.clear()
+    fa.main(["smoke", "--repo", "u/x-pilot", "--work", str(tmp_path / "w")])  # same bytes
+    assert hf.uploads() == ["smoke/manifest.csv"]
 
 
 def test_wanted_ids_filters_nat_rank_only_where_present(tmp_path):

@@ -331,22 +331,33 @@ full run downloads each of the 98 train zips once (`zipq.py`: one stream at a ti
 2 zips ahead, a zip deleted when all consumers marked it done, at least 20 GB free required
 before each download). One long-lived `embed.py --zip-dir` process per backbone reads the
 same local zip; `ft_archive.py` copies the fine-tuning images (nat_200K, dev, dev_seen) byte
-for byte into ~1 GB ZIP_STORED parts with a sha256 manifest and uploads them to a private
-Kaggle Dataset. `scripts/kaggle_pilot.sh` tries this end to end on
-3 zips (all backbones, checks, upload, quota timestamps, 40-minute deadline).
+for byte into ~1 GB ZIP_STORED parts with a sha256 manifest. Each part is uploaded to a
+private Hugging Face dataset repo as soon as it is committed (skipped if the repo already has
+the same sha256), checked against the repo's sha256 and deleted locally; `manifest.csv` goes
+last. `scripts/kaggle_pilot.sh` tries this end to end on 3 zips (all backbones, checks,
+upload to the separate `-pilot` repo, quota timestamps, disk peaks, 40-minute deadline).
+GPU layout: StreetCLIP alone on GPU1; L/14-336 and B/16 together on GPU0. Phase 1 does not
+compare its embeddings with the Phase 0 cache (`--reference`): the Phase 0b audit found the
+local-zip bytes identical to the range-read bytes (sha256, 200/200), and both read modes feed
+the same decode, preprocessing and model code.
 
-Pilot notebook (2x T4, internet on). Cell 1 (secrets from Kaggle Secrets, never printed):
+Before a Kaggle run, check the token and the upload path locally (a dummy 2-part archive is
+uploaded to `smoke/` in the pilot repo, re-downloaded and verified; prints the private flag):
+```
+$env:HF_TOKEN = "<token with write access>"   # PowerShell; bash: export HF_TOKEN=...
+uv run python -m geoguessr_ai.ft_archive smoke --repo Daggerabuse/osv5m-ft-archive-pilot
+```
+
+Pilot notebook (2x T4, internet on). Cell 1 (the secret from Kaggle Secrets, never printed):
 ```python
 import os
 from kaggle_secrets import UserSecretsClient
-s = UserSecretsClient()
-for k in ("HF_TOKEN", "KAGGLE_USERNAME", "KAGGLE_KEY"):
-    os.environ[k] = s.get_secret(k)
+os.environ["HF_TOKEN"] = UserSecretsClient().get_secret("HF_TOKEN")
 ```
 Cell 2:
 ```
 !git clone <repo url> /kaggle/working/geoguessr-ai && cd /kaggle/working/geoguessr-ai && pip install -q -e .
-!cd /kaggle/working/geoguessr-ai && bash scripts/kaggle_pilot.sh 2>&1 | tee /kaggle/working/pilot.log
+!mkdir -p /kaggle/working/pilot && cd /kaggle/working/geoguessr-ai && bash scripts/kaggle_pilot.sh 2>&1 | tee /kaggle/working/pilot/pilot.log
 ```
 
 ```

@@ -2,7 +2,7 @@
 
 Images: nat_rank < --nat-max of train.csv, plus dev.csv and dev_seen.csv. They are taken
 byte for byte from the zips that zipq.py downloads (no re-encoding) and end up in ~1 GB
-ZIP_STORED parts with a sha256 manifest, uploaded to a PRIVATE Kaggle Dataset.
+ZIP_STORED parts with a sha256 manifest, uploaded to a PRIVATE Hugging Face dataset repo.
 
   consume  a zipq consumer: for each --shards zip, copy the wanted images into a staging
            chunk (chunk_<src>_NN.zip + .csv with id, bytes, sha256 of the source bytes),
@@ -11,31 +11,41 @@ ZIP_STORED parts with a sha256 manifest, uploaded to a PRIVATE Kaggle Dataset.
            (--final: also the rest). Every entry's sha256 is checked while copying and again
            by re-reading the finished part; part_NNN.csv is the commit record (a part without
            it is incomplete and redone; chunks already in a committed part are dropped).
-           --final also writes manifest.csv (all parts).
-  upload   kaggle datasets version; if that fails with "not found", create (private);
-           other failures are retried. --dataset is the slug, always explicit. Credentials
-           only from KAGGLE_USERNAME / KAGGLE_KEY in the environment (no kaggle.json is
-           written); the key is redacted from everything this module prints or logs.
+           --final also writes manifest.csv (all parts). Parts are byte-deterministic;
+           part_NNN.sha256 holds the sha256 of the whole part file.
+  upload   (consume --repo does this part by part, as soon as each is committed) create the
+           repo private and refuse it if it is not; upload each part still on disk unless
+           the repo has the same sha256; check the repo's sha256; delete the local zip;
+           manifest.csv last. Only network errors, 429 and 5xx are retried; 401/403 and other
+           errors fail at once. Token only from HF_TOKEN, redacted from all output.
+  smoke    a dummy 2-part archive uploaded to <repo>/smoke/ (*-pilot repos only), then
+           re-downloaded and verified (file sha256 and every image's sha256).
 
 Usage (Kaggle):
   python -m geoguessr_ai.ft_archive consume --ids v2/train.csv v2/dev.csv v2/dev_seen.csv \\
       --zip-dir /kaggle/temp/zips --index-dir /kaggle/working/emb/zip_index --shards 0 1 2 \\
-      --staging /kaggle/temp/ft_staging --out /kaggle/temp/ft_archive
+      --staging /kaggle/temp/ft_staging --out /kaggle/temp/ft_archive \\
+      --repo <user>/osv5m-ft-archive-pilot
   python -m geoguessr_ai.ft_archive pack --staging ... --out ... --final
-  python -m geoguessr_ai.ft_archive upload --out /kaggle/temp/ft_archive --dataset osv5m-ft-pilot
+  python -m geoguessr_ai.ft_archive upload --out /kaggle/temp/ft_archive --repo <user>/...
+Usage (local smoke test; HF_TOKEN with write access in the environment):
+  uv run python -m geoguessr_ai.ft_archive smoke --repo <user>/osv5m-ft-archive-pilot
 """
 
 import argparse
 import hashlib
-import json
+import io
 import os
-import subprocess
+import shutil
 import sys
 import time
 import zipfile
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
+from huggingface_hub import HfApi, hf_hub_download
+from PIL import Image
 
 from geoguessr_ai.prep_data import make_opener
 from geoguessr_ai.zipq import (
@@ -45,6 +55,12 @@ from geoguessr_ai.zipq import (
     wait_ready,
     write_text,
 )
+
+try:  # the hub client's network errors (httpx2 in huggingface_hub 2.x)
+    from httpx2 import TransportError as _TransportError
+except ImportError:  # pragma: no cover
+    _TransportError = ConnectionError
+NETWORK_ERRORS = (ConnectionError, TimeoutError, _TransportError)
 
 MANIFEST_COLS = ["id", "part", "bytes", "sha256", "shard", "chunk"]
 
@@ -57,7 +73,8 @@ def wanted_ids(paths, nat_max: int) -> set[str]:
     """ids of the CSVs; rows of a CSV with nat_rank only if nat_rank < nat_max."""
     out: set[str] = set()
     for p in paths:
-        df = pd.read_csv(p, dtype={"id": str}, keep_default_na=False)
+        df = pd.read_csv(p, usecols=lambda c: c in ("id", "nat_rank"), dtype={"id": str},
+                         keep_default_na=False)  # only these columns: no mixed-type warning
         if "nat_rank" in df:
             df = df[df["nat_rank"] < nat_max]
         out |= set(df["id"])
@@ -68,8 +85,8 @@ def write_zip(path: Path, entries) -> None:
     """entries: [(name, bytes)] -> ZIP_STORED zip, written atomically."""
     def write(f):
         with zipfile.ZipFile(f, "w", compression=zipfile.ZIP_STORED) as zf:
-            for name, data in entries:
-                zf.writestr(name, data)
+            for name, data in entries:  # fixed timestamp: same entries -> same bytes
+                zf.writestr(zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0)), data)
     atomic_write(path, write)
 
 
@@ -93,6 +110,10 @@ def stage_shard(opener, src: str, shard: int, items, staging: Path) -> int:
 
 
 def consume(args) -> None:
+    hub = None
+    if args.repo:
+        hub, _ = make_hub(args.repo, "", args.retries, args.backoff, args.log)
+        hub.open()  # fails before any work if the token or the repo is wrong
     want = wanted_ids(args.ids, args.nat_max)
     opener = make_opener(args.zip_dir / "images")
     args.staging.mkdir(parents=True, exist_ok=True)
@@ -106,7 +127,12 @@ def consume(args) -> None:
             write_text(done, "")
             print(f"{args.source} zip {shard:02d}: {n} images staged")
         pack(args.staging, args.out, args.part_gb, final=False)
+        if hub:
+            upload_parts(hub, args.out)
     pack(args.staging, args.out, args.part_gb, final=True)
+    if hub:
+        upload_parts(hub, args.out)
+        finish(hub, args.out)
 
 
 # ----------------------------------------------------------------- pack
@@ -166,6 +192,7 @@ def write_part(chunk_csvs: list[Path], out: Path) -> Path:
     write_zip(part, entries)
     m = pd.DataFrame(rows, columns=MANIFEST_COLS)
     verify_part(part, m)
+    write_text(part.with_suffix(".sha256"), file_sha256(part) + "\n")
     write_text(part.with_suffix(".csv"), m.to_csv(index=False))  # commit
     for csv in chunk_csvs:
         csv.with_suffix(".zip").unlink()
@@ -189,6 +216,14 @@ def verify_part(part: Path, manifest: pd.DataFrame) -> None:
 # ----------------------------------------------------------------- upload
 
 
+def file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while b := f.read(1 << 23):
+            h.update(b)
+    return h.hexdigest()
+
+
 def redact(text: str, secrets) -> str:
     for s in secrets:
         if s:
@@ -196,47 +231,144 @@ def redact(text: str, secrets) -> str:
     return text
 
 
-def not_found(output: str) -> bool:
-    """Does a failed `kaggle datasets version` say the dataset does not exist yet?"""
-    o = output.lower()
-    return "404" in o or "not found" in o or "does not exist" in o
+def transient(e: Exception) -> bool:
+    """Worth retrying: network errors, 429, 5xx. Anything else (401, 403, 404, ...) fails fast."""
+    code = getattr(getattr(e, "response", None), "status_code", None)
+    if code is not None:
+        return code == 429 or code >= 500
+    return isinstance(e, NETWORK_ERRORS)
 
 
-def upload(out: Path, slug: str, title: str, kaggle_cmd: list[str], retries: int,
-           backoff: float, log_path: Path | None = None) -> bool:
-    user, key = os.environ.get("KAGGLE_USERNAME"), os.environ.get("KAGGLE_KEY")
-    if not (user and key):
-        raise SystemExit("KAGGLE_USERNAME and KAGGLE_KEY must be set (Kaggle Secrets)")
-    secrets = [key, os.environ.get("HF_TOKEN")]
+class Hub:
+    """A PRIVATE Hugging Face dataset repo; files go under `prefix`."""
+
+    def __init__(self, api, repo: str, prefix: str = "", retries: int = 5, backoff: float = 30,
+                 log=print):
+        self.api, self.repo, self.prefix = api, repo, prefix
+        self.retries, self.backoff, self.log = retries, backoff, log
+
+    def call(self, what: str, fn):
+        for attempt in range(self.retries + 1):
+            try:
+                return fn()
+            except Exception as e:
+                if not transient(e) or attempt == self.retries:
+                    raise
+                wait = self.backoff * 2**attempt
+                self.log(f"{what}: {type(e).__name__} (transient); retry in {wait:.0f} s")
+                time.sleep(wait)
+        raise AssertionError("unreachable")
+
+    def open(self) -> None:
+        """Create the repo private (a no-op if it exists); refuse a repo that is not private."""
+        self.call("create_repo", lambda: self.api.create_repo(
+            self.repo, repo_type="dataset", private=True, exist_ok=True))
+        private = self.call("repo_info", lambda: self.api.repo_info(
+            self.repo, repo_type="dataset")).private
+        self.log(f"{self.repo}: private={private}")
+        if private is not True:
+            raise SystemExit(f"{self.repo} is not private: refusing to upload")
+
+    def remote_sha256(self, name: str) -> str | None:
+        """sha256 of the file in the repo (its LFS oid), None if it is not there."""
+        path = self.prefix + name
+        info = self.call(f"paths_info {path}", lambda: self.api.get_paths_info(
+            self.repo, [path], repo_type="dataset"))
+        if not info:
+            return None
+        if getattr(info[0], "lfs", None) is None:  # never re-upload or trust what we cannot verify
+            raise SystemExit(f"{path} is in the repo but has no LFS sha256")
+        return info[0].lfs.sha256
+
+    def put(self, local: Path, name: str) -> None:
+        path = self.prefix + name
+        self.call(f"upload {path}", lambda: self.api.upload_file(
+            path_or_fileobj=str(local), path_in_repo=path, repo_id=self.repo,
+            repo_type="dataset", commit_message=f"add {path}"))
+        self.log(f"uploaded {path} ({local.stat().st_size / 1e9:.3f} GB)")
+
+
+def upload_parts(hub: Hub, out: Path) -> None:
+    """Upload every committed part still on disk (skipped if the repo already has the same
+    sha256), check the repo's sha256, then delete the local zip. Its .csv/.sha256 stay."""
+    for csv in sorted(out.glob("part_*.csv")):
+        part, sha = csv.with_suffix(".zip"), csv.with_suffix(".sha256")
+        if not part.exists():  # uploaded and deleted earlier; finish() checks the repo
+            continue
+        want = sha.read_text().strip()
+        if hub.remote_sha256(part.name) == want:
+            hub.log(f"{part.name}: already in {hub.repo} with the same sha256, not uploaded")
+        else:
+            hub.put(part, part.name)
+            hub.put(sha, sha.name)
+            if hub.remote_sha256(part.name) != want:
+                raise SystemExit(f"{part.name}: sha256 in the repo differs from the local part")
+        part.unlink()
+
+
+def finish(hub: Hub, out: Path) -> None:
+    """Every committed part is in the repo with its sha256; then manifest.csv, last."""
+    for csv in sorted(out.glob("part_*.csv")):
+        name = csv.with_suffix(".zip").name
+        if hub.remote_sha256(name) != csv.with_suffix(".sha256").read_text().strip():
+            raise SystemExit(f"{name}: missing or different in the repo")
+    hub.put(out / "manifest.csv", "manifest.csv")
+
+
+def make_hub(repo: str, prefix: str, retries: int, backoff: float, log_path: Path | None):
+    """(Hub, token). The token comes only from HF_TOKEN and is redacted from every log line."""
+    token = os.environ.get("HF_TOKEN")
+    if not token:
+        raise SystemExit("HF_TOKEN must be set (write access to the dataset repo)")
 
     def log(msg: str) -> None:
-        msg = redact(msg, secrets)
-        print(msg)
+        msg = redact(msg, [token])
+        print(msg, flush=True)
         if log_path:
             with open(log_path, "a", encoding="utf-8") as f:
                 f.write(msg + "\n")
 
-    def kaggle(*a: str) -> subprocess.CompletedProcess:
-        r = subprocess.run([*kaggle_cmd, *a], capture_output=True, text=True, check=False)
-        log(f"$ kaggle {' '.join(a)} -> exit {r.returncode}\n{r.stdout}{r.stderr}".rstrip())
-        return r
+    return Hub(HfApi(token=token), repo, prefix, retries, backoff, log), token
 
-    if not (out / "manifest.csv").exists():
-        raise SystemExit(f"{out}/manifest.csv missing: run pack --final first")
-    meta = {"title": title, "id": f"{user}/{slug}", "licenses": [{"name": "CC-BY-SA-4.0"}]}
-    write_text(out / "dataset-metadata.json", json.dumps(meta, indent=2))  # no key in it
-    for attempt in range(retries + 1):
-        r = kaggle("datasets", "version", "-p", str(out), "-m", "ft archive", "--dir-mode", "skip")
-        if r.returncode != 0 and not_found(r.stdout + r.stderr):
-            # first upload: new datasets are private unless --public is passed (never here)
-            r = kaggle("datasets", "create", "-p", str(out), "--dir-mode", "skip")
-        if r.returncode == 0:
-            log(f"uploaded {out} to {user}/{slug} (private)")
-            return True
-        if attempt < retries:
-            log(f"upload attempt {attempt + 1} failed; retrying in {backoff * 2**attempt:.0f} s")
-            time.sleep(backoff * 2**attempt)
-    return False
+
+def smoke(repo: str, work: Path, log_path: Path | None) -> None:
+    """A dummy 2-part archive through the real upload path, then re-downloaded and checked."""
+    if not repo.endswith("-pilot"):
+        raise SystemExit("smoke only uploads to a *-pilot repo")
+    hub, token = make_hub(repo, "smoke/", retries=3, backoff=5, log_path=log_path)
+    staging, out, dl = work / "staging", work / "out", work / "download"
+    shutil.rmtree(work, ignore_errors=True)
+    staging.mkdir(parents=True)
+    rng = np.random.default_rng(0)  # seeded: a rerun builds the same parts and skips them
+    for shard in (0, 1):
+        rows, entries = [], []
+        for k in range(3):
+            buf = io.BytesIO()
+            Image.fromarray(rng.integers(0, 256, (32, 32, 3), dtype=np.uint8)).save(buf, "JPEG")
+            data, id_ = buf.getvalue(), f"smoke{shard}{k}"
+            entries.append((f"{id_}.jpg", data))
+            rows.append({"id": id_, "bytes": len(data), "sha256": sha256(data), "shard": shard})
+        write_zip(staging / f"chunk_smoke_{shard:02d}.zip", entries)
+        write_text(staging / f"chunk_smoke_{shard:02d}.csv", pd.DataFrame(rows).to_csv(index=False))
+    pack(staging, out, part_gb=1e-9, final=True)  # one part per chunk
+    hub.open()
+    upload_parts(hub, out)
+    finish(hub, out)
+    manifest = pd.read_csv(out / "manifest.csv", dtype={"id": str, "sha256": str})
+    for csv in sorted(out.glob("part_*.csv")):
+        name = csv.with_suffix(".zip").name
+        got = Path(hf_hub_download(repo, f"smoke/{name}", repo_type="dataset", token=token,
+                                   local_dir=dl))
+        if file_sha256(got) != csv.with_suffix(".sha256").read_text().strip():
+            raise SystemExit(f"{name}: downloaded sha256 differs")
+        verify_part(got, manifest[manifest["part"] == name])
+        hub.log(f"{name}: re-downloaded; file sha256 and every image's sha256 match")
+    got = Path(hf_hub_download(repo, "smoke/manifest.csv", repo_type="dataset", token=token,
+                               local_dir=dl))
+    if got.read_bytes() != (out / "manifest.csv").read_bytes():
+        raise SystemExit("manifest.csv differs in the repo")
+    private = hub.api.repo_info(repo, repo_type="dataset").private
+    hub.log(f"SMOKE OK: {len(manifest)} images in 2 parts; {repo} private={private}")
 
 
 # ----------------------------------------------------------------- main
@@ -261,23 +393,31 @@ def main(argv=None) -> None:
         p.add_argument("--out", type=Path, required=True)
         p.add_argument("--part-gb", type=float, default=1.0)
     pk.add_argument("--final", action="store_true")
-    u = sub.add_parser("upload")
+    u, sm = sub.add_parser("upload"), sub.add_parser("smoke")
+    for p in (c, u, sm):
+        p.add_argument("--repo", required=p is not c,
+                       help="private HF dataset repo user/name (consume: upload parts as they are made)")
+        p.add_argument("--log", type=Path)
+    for p in (c, u):
+        p.add_argument("--retries", type=int, default=5)
+        p.add_argument("--backoff", type=float, default=30)
     u.add_argument("--out", type=Path, required=True)
-    u.add_argument("--dataset", required=True, help="dataset slug (owner = KAGGLE_USERNAME)")
-    u.add_argument("--title", default="OSV-5M fine-tuning subset (raw JPEG bytes)")
-    u.add_argument("--retries", type=int, default=3)
-    u.add_argument("--backoff", type=float, default=30)
-    u.add_argument("--log", type=Path)
-    u.add_argument("--kaggle-cmd", nargs="+", default=["kaggle"])
+    sm.add_argument("--work", type=Path, default=Path("data/ft_smoke"))
     args = ap.parse_args(argv)
-    if args.cmd == "consume":
-        consume(args)
-    elif args.cmd == "pack":
-        pack(args.staging, args.out, args.part_gb, args.final)
-    elif not upload(args.out, args.dataset, args.title, args.kaggle_cmd, args.retries,
-                    args.backoff, args.log):
-        sys.exit("upload failed")
-
+    try:
+        if args.cmd == "consume":
+            consume(args)
+        elif args.cmd == "pack":
+            pack(args.staging, args.out, args.part_gb, args.final)
+        elif args.cmd == "upload":
+            hub, _ = make_hub(args.repo, "", args.retries, args.backoff, args.log)
+            hub.open()
+            upload_parts(hub, args.out)
+            finish(hub, args.out)
+        else:
+            smoke(args.repo, args.work, args.log)
+    except Exception as e:  # noqa: BLE001 - no traceback: report it with the token redacted
+        sys.exit(redact(f"{args.cmd} failed: {type(e).__name__}: {e}", [os.environ.get("HF_TOKEN")]))
 
 if __name__ == "__main__":
     main()
