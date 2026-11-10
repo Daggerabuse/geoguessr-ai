@@ -275,6 +275,69 @@ Evaluation: short side 224 + center crop; `--tta` averages left/center/right cro
 
 `data/` and `models/` are not tracked; `results/` is.
 
+## V2: global geolocation (in progress)
+
+V1 (the 33-country model above, its checkpoint, results and demo) is unchanged. V2 studies
+frozen-embedding geolocation (kNN retrieval and a linear probe on cached embeddings) over
+every country of the official OSV-5M test split. Outputs go to `results/v2/`.
+
+**Class list.** The classes are the countries that occur in the official test split *and*
+in the official train split: `classes = test countries ∩ train countries` (`v2_data.py`,
+`classes.json`). `audit.json` lists the countries found only in train (never a class, so their
+training images are not used) and only in test (no training data). Test images of a test-only
+country stay in the evaluation with label -1. A trained head can never predict them, so in
+every global metric they **count as errors** (top-1 and top-5), and in the macro average each
+such country counts with accuracy 0. They are also reported apart: the `class_in_train` group
+contains only images of countries with training data. The number of countries on each side is
+written to `audit.json` by the audit step.
+
+**Splits.** `train.csv`: the training pool, at most 3 frames per sequence, with two nested
+orderings (`nat_rank`: natural distribution, `bal_rank`: country round-robin); a subset of
+size N is `rank < N`, so smaller subsets are contained in larger ones. `dev.csv`: images
+(1 per sequence) from a seeded 2% of the photographers, none of whom is in `train.csv`; all
+choices (k, probe epoch) are made on dev. `test.csv`: the full official test split. It is
+scored only with `geo_eval --eval-test` (final configurations), and no smoke test or
+benchmark reads it. Train rows sharing an id or a sequence with test are dropped (counted
+in `config.json`).
+
+**Reporting.** Every result is also split into row groups: `reliable` countries (at least
+100 test images and 50 test sequences), `head`/`middle`/`tail` (thirds of the class list by
+official training images) and photographer seen/unseen in the training subset. A group only
+selects rows; predictions always range over the full class list. Distance metrics follow
+OSV-5M (haversine km, GeoScore = 5000·exp(−km/1492.7), accuracy within 1/25/200/750/2500 km);
+intervals are a bootstrap over sequences. Only results on the full official test split with
+these metrics are comparable with the OSV-5M paper.
+
+**Embeddings.** `embed.py` streams images from the shard zips (no image is stored) and
+preprocesses them exactly like each model's `CLIPImageProcessor` (V1's evaluation crop
+rounds the resized long side instead of truncating it, a one-pixel difference). One cache
+directory per encoder and GPU type (T4 and P100 caches are never mixed): float16,
+L2-normalized, `.npz` per shard and run; resumable, and `--parts 2 --part 1 --device cuda:1`
+runs a second process on the second T4. `--limit N` picks a seeded sample of N ids for all
+parts together (the same sample on every rerun). `--check` verifies a cache: every target
+id exactly once, and with `--reference` the same embeddings as another cache.
+
+`scripts/kaggle_phase0.sh` runs the whole validation session on Kaggle (audit, throughput
+of each backbone, 2,000-image smoke test, dual-T4 run with an interrupted and resumed part);
+it stops at the first failed check.
+
+```
+# audit only (countries, overlap, groups), then the manifests
+python -m geoguessr_ai.v2_data --out /kaggle/working/v2 --audit-only
+python -m geoguessr_ai.v2_data --out /kaggle/working/v2 --sizes 50000 100000 200000 500000
+# throughput: GPU-only benchmark, then a 2000-image end-to-end smoke test on training images
+python -m geoguessr_ai.bench --model openai/clip-vit-base-patch16 --batch-size 64
+python -m geoguessr_ai.embed --ids /kaggle/working/v2/train.csv --source train \
+    --model openai/clip-vit-base-patch16 --out /kaggle/working/emb/clip_b16 --limit 2000
+# embeddings of the training pool and dev (test only for final configurations)
+python -m geoguessr_ai.embed --ids /kaggle/working/v2/train.csv --source train ...
+python -m geoguessr_ai.embed --ids /kaggle/working/v2/dev.csv --source train ...
+# kNN and probe per subset size, scored on dev; add --eval-test for final configurations
+python -m geoguessr_ai.geo_eval --data /kaggle/working/v2 --emb /kaggle/working/emb/clip_b16 \
+    --model openai/clip-vit-base-patch16 --tag clip_b16 --strategy bal \
+    --sizes 50000 100000 200000 500000
+```
+
 ## Future work
 
 - Split val by creator (not only by sequence) to reduce the val-test gap.
