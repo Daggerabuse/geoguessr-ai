@@ -334,8 +334,16 @@ same local zip; `ft_archive.py` copies the fine-tuning images (nat_200K, dev, de
 for byte into ~1 GB ZIP_STORED parts with a sha256 manifest. Each part is uploaded to a
 private Hugging Face dataset repo as soon as it is committed (skipped if the repo already has
 the same sha256), checked against the repo's sha256 and deleted locally; `manifest.csv` goes
-last. `scripts/kaggle_pilot.sh` tries this end to end on 3 zips (all backbones, checks,
-upload to the separate `-pilot` repo, quota timestamps, disk peaks, 40-minute deadline).
+last. `scripts/kaggle_phase1.sh` runs this end to end in one of two modes (settings and the
+repo guard in `phase1.py`): `kaggle_pilot.sh` = 3 zips, 40 min, archive only to the separate
+`-pilot` repo; `kaggle_full.sh` = all 98 zips (pool + dev + dev_seen; no test image), 11 h,
+archive only to `Daggerabuse/osv5m-ft-archive`. Both print a progress line whenever a
+consumer finishes a zip (zips done, img/s, ETA, disk use), log quota timestamps and disk
+peaks, and at the deadline write a STOP marker: every process finishes the zip in hand and
+starts no new one, so completed zips stay valid, and the script prints RESUME NEEDED with the
+zips left (exit 3) instead of running the checks. A rerun with the embedding cache restored
+skips what is already embedded; rebuilt archive parts are byte-identical and are not
+uploaded again.
 GPU layout: StreetCLIP alone on GPU1; L/14-336 and B/16 together on GPU0. Phase 1 does not
 compare its embeddings with the Phase 0 cache (`--reference`): the Phase 0b audit found the
 local-zip bytes identical to the range-read bytes (sha256, 200/200), and both read modes feed
@@ -359,6 +367,13 @@ Cell 2:
 !git clone <repo url> /kaggle/working/geoguessr-ai && cd /kaggle/working/geoguessr-ai && pip install -q -e .
 !mkdir -p /kaggle/working/pilot && cd /kaggle/working/geoguessr-ai && bash scripts/kaggle_pilot.sh 2>&1 | tee /kaggle/working/pilot/pilot.log
 ```
+Full run: the same Cell 1, then
+```
+!git clone <repo url> /kaggle/working/geoguessr-ai && cd /kaggle/working/geoguessr-ai && pip install -q -e .
+!mkdir -p /kaggle/working/full && cd /kaggle/working/geoguessr-ai && bash scripts/kaggle_full.sh 2>&1 | tee /kaggle/working/full/full.log
+```
+Outputs: `/kaggle/working/full/` (logs, checks, progress, disk peaks, quota times) and the
+embeddings in `/kaggle/working/emb/`.
 
 ```
 # audit only (countries, overlap, groups), then the manifests

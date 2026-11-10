@@ -355,8 +355,11 @@ def run_zips(args, want, cached: set[str], enc: dict, meter: dict) -> dict:
             target += sum(i in wanted for i in load_zip_index(args.index_dir, args.source, [shard]))
             continue
         t = time.time()
-        wait_ready(args.zip_dir, args.source, shard, args.poll, args.wait_timeout)
+        ready = wait_ready(args.zip_dir, args.source, shard, args.poll, args.wait_timeout)
         meter["wait_seconds"] += time.time() - t
+        if not ready:  # clean stop at a zip boundary: every zip marked done so far is complete
+            print(f"\nSTOP requested: stopping before {args.source} zip {shard:02d}")
+            break
         mine = sorted((i, n) for i, (_, n) in
                       load_zip_index(args.index_dir, args.source, [shard]).items() if i in wanted)
         target += len(mine)

@@ -47,6 +47,7 @@ import pandas as pd
 from huggingface_hub import HfApi, hf_hub_download
 from PIL import Image
 
+from geoguessr_ai.phase1 import MODES, check_repo
 from geoguessr_ai.prep_data import make_opener
 from geoguessr_ai.zipq import (
     atomic_write,
@@ -112,6 +113,7 @@ def stage_shard(opener, src: str, shard: int, items, staging: Path) -> int:
 def consume(args) -> None:
     hub = None
     if args.repo:
+        check_repo(args.mode, args.repo)
         hub, _ = make_hub(args.repo, "", args.retries, args.backoff, args.log)
         hub.open()  # fails before any work if the token or the repo is wrong
     want = wanted_ids(args.ids, args.nat_max)
@@ -120,7 +122,13 @@ def consume(args) -> None:
     for shard in args.shards:
         done = marker(args.zip_dir, args.source, shard, f"{args.consumer}.done")
         if not done.exists():
-            wait_ready(args.zip_dir, args.source, shard, args.poll, args.wait_timeout)
+            if not wait_ready(args.zip_dir, args.source, shard, args.poll, args.wait_timeout):
+                # clean stop: committed parts stay (and are uploaded); no manifest for a partial
+                # archive. A rerun rebuilds the same parts and skips those already in the repo.
+                print(f"STOP requested: stopping before {args.source} zip {shard:02d}")
+                if hub:
+                    upload_parts(hub, args.out)
+                return
             index = load_zip_index(args.index_dir, args.source, [shard])
             items = sorted((i, n) for i, (_, n) in index.items() if i in want)
             n = stage_shard(opener, args.source, shard, items, args.staging)
@@ -333,8 +341,7 @@ def make_hub(repo: str, prefix: str, retries: int, backoff: float, log_path: Pat
 
 def smoke(repo: str, work: Path, log_path: Path | None) -> None:
     """A dummy 2-part archive through the real upload path, then re-downloaded and checked."""
-    if not repo.endswith("-pilot"):
-        raise SystemExit("smoke only uploads to a *-pilot repo")
+    check_repo("pilot", repo)  # smoke only ever writes to a *-pilot repo
     hub, token = make_hub(repo, "smoke/", retries=3, backoff=5, log_path=log_path)
     staging, out, dl = work / "staging", work / "out", work / "download"
     shutil.rmtree(work, ignore_errors=True)
@@ -399,17 +406,22 @@ def main(argv=None) -> None:
                        help="private HF dataset repo user/name (consume: upload parts as they are made)")
         p.add_argument("--log", type=Path)
     for p in (c, u):
+        p.add_argument("--mode", choices=sorted(MODES),
+                       help="pilot: *-pilot repos only; full: only the main archive repo")
         p.add_argument("--retries", type=int, default=5)
         p.add_argument("--backoff", type=float, default=30)
     u.add_argument("--out", type=Path, required=True)
     sm.add_argument("--work", type=Path, default=Path("data/ft_smoke"))
     args = ap.parse_args(argv)
+    if args.cmd in ("consume", "upload") and args.repo and not args.mode:
+        ap.error("--repo needs --mode pilot|full")
     try:
         if args.cmd == "consume":
             consume(args)
         elif args.cmd == "pack":
             pack(args.staging, args.out, args.part_gb, args.final)
         elif args.cmd == "upload":
+            check_repo(args.mode, args.repo)
             hub, _ = make_hub(args.repo, "", args.retries, args.backoff, args.log)
             hub.open()
             upload_parts(hub, args.out)

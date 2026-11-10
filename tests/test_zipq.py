@@ -219,6 +219,34 @@ def test_embed_zip_mode_resumes_after_a_crash_mid_zip(hub, monkeypatch):
     assert not list((zips / "images").rglob("*.zip"))
 
 
+def test_embed_zip_mode_stops_cleanly_at_a_zip_boundary_and_resumes(hub, monkeypatch):
+    pytest.importorskip("transformers")
+    root, ids, fetch, _ = hub
+    pd.DataFrame({"id": ids}).to_csv(root / "all.csv", index=False)
+    out, zips = root / "emb" / "m", root / "zips"
+    t, box, _ = _downloader(root, fetch, ["m"])
+    real = e.embed_jobs
+
+    def stop_during_zip_0(jobs, *a, **k):
+        if jobs[0][0] == 0:
+            z.write_text(zips / "markers" / "STOP", "deadline")  # the deadline hits mid-zip
+        return real(jobs, *a, **k)
+
+    monkeypatch.setattr(e, "embed_jobs", stop_during_zip_0)
+    stats = _embed_zips(root, out, root / "all.csv")
+    t.join(60)
+    assert "err" not in box and box["stats"]["stopped"]  # the downloader stopped too, no ABORT
+    assert z.marker(zips, "train", 0, "m.done").exists()  # the zip in hand was finished
+    assert not z.marker(zips, "train", 1, "m.done").exists() and stats["target"] == 8
+    assert not z.aborted(zips)
+    monkeypatch.setattr(e, "embed_jobs", real)
+    t, box, _ = _downloader(root, fetch, ["m"])  # the rerun clears STOP
+    _embed_zips(root, out, root / "all.csv")
+    t.join(60)
+    res = _check_zips(root, out, root / "all.csv")
+    assert "err" not in box and res["ok"] and res["unique"] == len(ids)
+
+
 def test_embed_zip_mode_args_are_validated():
     with pytest.raises(SystemExit):
         e.parse_args(["--ids", "a.csv", "--source", "train", "--out", "o", "--zip-dir", "z"])
@@ -369,7 +397,8 @@ def _archive(root: Path) -> Path:
 
 
 def _upload(out: Path, *extra: str):
-    fa.main(["upload", "--out", str(out), "--repo", "u/x-pilot", "--backoff", "0", *extra])
+    fa.main(["upload", "--out", str(out), "--repo", "u/x-pilot", "--mode", "pilot", "--backoff", "0",
+             *extra])
 
 
 def test_hf_upload_is_private_verified_deletes_parts_and_sends_the_manifest_last(hub, hf, capsys):
@@ -436,7 +465,7 @@ def test_hf_upload_retries_5xx_429_and_network_errors(hub, hf):
 def test_hf_upload_needs_hf_token_from_the_environment(tmp_path, monkeypatch):
     monkeypatch.delenv("HF_TOKEN", raising=False)
     with pytest.raises(SystemExit, match="HF_TOKEN"):
-        fa.main(["upload", "--out", str(tmp_path), "--repo", "u/x-pilot"])
+        fa.main(["upload", "--out", str(tmp_path), "--repo", "u/x-pilot", "--mode", "pilot"])
 
 
 def test_consume_uploads_each_part_as_it_is_made(hub, hf):
@@ -447,7 +476,7 @@ def test_consume_uploads_each_part_as_it_is_made(hub, hf):
     fa.main(["consume", "--ids", str(root / "train.csv"), "--zip-dir", str(root / "zips"),
              "--index-dir", str(root / "index"), "--shards", "0", "1", "2", "--poll", "0.01",
              "--staging", str(root / "staging"), "--out", str(out), "--part-gb", "1e-6",
-             "--repo", "u/x-pilot", "--backoff", "0"])
+             "--repo", "u/x-pilot", "--mode", "pilot", "--backoff", "0"])
     t.join(60)
     assert "err" not in box
     assert hf.uploads()[-1] == "manifest.csv" and not list(out.glob("part_*.zip"))
@@ -457,6 +486,53 @@ def test_consume_uploads_each_part_as_it_is_made(hub, hf):
     for part in m["part"].unique():
         with zipfile.ZipFile(io.BytesIO(hf.files[part])) as zf:
             assert all(zf.read(i) == src[Path(i.filename).stem] for i in zf.infolist())
+
+
+def test_consume_stops_at_a_zip_boundary_uploads_committed_parts_and_no_manifest(hub, hf,
+                                                                                 monkeypatch):
+    root, ids, fetch, _ = hub
+    pd.DataFrame({"id": ids, "nat_rank": range(len(ids))}).to_csv(root / "train.csv", index=False)
+    zips, out = root / "zips", root / "ft"
+    real = fa.stage_shard
+
+    def stop_after_zip_0(opener, src, shard, items, staging):
+        n = real(opener, src, shard, items, staging)
+        if shard == 0:
+            z.write_text(zips / "markers" / "STOP", "deadline")
+        return n
+
+    monkeypatch.setattr(fa, "stage_shard", stop_after_zip_0)
+    argv = ["consume", "--ids", str(root / "train.csv"), "--zip-dir", str(zips),
+            "--index-dir", str(root / "index"), "--shards", "0", "1", "2", "--poll", "0.01",
+            "--staging", str(root / "staging"), "--out", str(out), "--part-gb", "1e-6",
+            "--repo", "u/x-pilot", "--mode", "pilot", "--backoff", "0"]
+    t, box, _ = _downloader(root, fetch, ["ft_archive"])
+    fa.main(argv)
+    t.join(60)
+    assert "err" not in box and box["stats"]["stopped"]
+    assert "part_000.zip" in hf.files and "manifest.csv" not in hf.files
+    assert not (out / "manifest.csv").exists() and not list(out.glob("part_*.zip"))
+    monkeypatch.setattr(fa, "stage_shard", real)
+    t, box, _ = _downloader(root, fetch, ["ft_archive"])
+    fa.main(argv)
+    t.join(60)
+    assert "err" not in box and hf.uploads().count("part_000.zip") == 1  # never re-uploaded
+    m = pd.read_csv(io.BytesIO(hf.files["manifest.csv"]), dtype={"id": str})
+    assert set(m["id"]) == set(ids) and not m["id"].duplicated().any()
+
+
+def test_repo_guard_by_mode(hub, hf):
+    out = _archive(hub[0])
+    base = ["upload", "--out", str(out), "--backoff", "0"]
+    with pytest.raises(SystemExit, match="full mode only"):
+        fa.main([*base, "--repo", "Daggerabuse/osv5m-ft-archive-pilot", "--mode", "full"])
+    with pytest.raises(SystemExit, match="pilot mode only"):
+        fa.main([*base, "--repo", "Daggerabuse/osv5m-ft-archive", "--mode", "pilot"])
+    with pytest.raises(SystemExit):  # --repo without --mode
+        fa.main([*base, "--repo", "u/x-pilot"])
+    assert hf.calls == []  # nothing touched either repo
+    fa.main([*base, "--repo", "Daggerabuse/osv5m-ft-archive", "--mode", "full"])
+    assert hf.calls[0][1] == "Daggerabuse/osv5m-ft-archive" and "manifest.csv" in hf.files
 
 
 def test_smoke_uploads_two_parts_verifies_the_download_and_reruns_without_reuploading(

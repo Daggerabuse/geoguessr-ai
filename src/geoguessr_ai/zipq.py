@@ -93,6 +93,12 @@ def aborted(zip_dir: Path) -> str | None:
     return p.read_text() if p.exists() else None
 
 
+def stopped(zip_dir: Path) -> bool:
+    """A clean stop was requested (markers/STOP, e.g. at a deadline): finish the zip in hand,
+    start no new one. Unlike ABORT this is not a failure; completed zips stay valid."""
+    return (zip_dir / "markers" / "STOP").exists()
+
+
 def wait_for(cond, poll: float, timeout: float, what: str, zip_dir: Path | None = None) -> None:
     """Poll until cond() is true; RuntimeError on timeout or (if zip_dir) on ABORT."""
     t0 = time.time()
@@ -104,9 +110,12 @@ def wait_for(cond, poll: float, timeout: float, what: str, zip_dir: Path | None 
         time.sleep(poll)
 
 
-def wait_ready(zip_dir: Path, src: str, shard: int, poll: float, timeout: float) -> None:
-    wait_for(marker(zip_dir, src, shard, "ready").exists, poll, timeout,
+def wait_ready(zip_dir: Path, src: str, shard: int, poll: float, timeout: float) -> bool:
+    """True once the zip is ready; False if a STOP is (or gets) requested first."""
+    ready = marker(zip_dir, src, shard, "ready")
+    wait_for(lambda: ready.exists() or stopped(zip_dir), poll, timeout,
              f"{src} zip {shard:02d}", zip_dir)
+    return not stopped(zip_dir)
 
 
 # ----------------------------------------------------------------- downloader
@@ -134,9 +143,10 @@ def download_all(shards, src: str, zip_dir: Path, index_dir: Path, consumers,
                  wait_timeout: float = 7200, fetch=hf_fetch, free=free_gb, log=print) -> dict:
     """Download, index and mark each shard in order; delete consumed zips; return stats."""
     (zip_dir / "markers").mkdir(parents=True, exist_ok=True)
-    (zip_dir / "markers" / "ABORT").unlink(missing_ok=True)  # a rerun starts clean
+    for m in ("ABORT", "STOP"):  # a rerun starts clean
+        (zip_dir / "markers" / m).unlink(missing_ok=True)
     index_dir.mkdir(parents=True, exist_ok=True)
-    stats: dict = {"downloads": [], "extra_ids": 0, "deleted": []}
+    stats: dict = {"downloads": [], "extra_ids": 0, "deleted": [], "stopped": False}
 
     def cleanup() -> None:
         for s in shards:
@@ -155,10 +165,13 @@ def download_all(shards, src: str, zip_dir: Path, index_dir: Path, consumers,
                 continue  # resume: finished in an earlier run
             if marker(zip_dir, src, shard, "ready").exists() and zip_path(zip_dir, src, shard).exists():
                 continue
-            wait_for(lambda k=k: on_disk(shards[:k]) <= window, poll, wait_timeout,
-                     f"consumers to finish zips before {shard:02d}", zip_dir)
-            wait_for(lambda: free(zip_dir) >= min_free_gb, poll, wait_timeout,
-                     f"{min_free_gb} GB free disk", zip_dir)
+            wait_for(lambda k=k: on_disk(shards[:k]) <= window or stopped(zip_dir), poll,
+                     wait_timeout, f"consumers to finish zips before {shard:02d}", zip_dir)
+            wait_for(lambda: free(zip_dir) >= min_free_gb or stopped(zip_dir), poll,
+                     wait_timeout, f"{min_free_gb} GB free disk", zip_dir)
+            if stopped(zip_dir):
+                log(f"STOP requested: no download from {src} zip {shard:02d} on")
+                break
             index = fetch_and_index(src, shard, zip_dir, retries, backoff, fetch, log, stats)
             write_text(index_path(index_dir, src, shard), json.dumps(index))
             if known_ids is not None:
@@ -169,7 +182,9 @@ def download_all(shards, src: str, zip_dir: Path, index_dir: Path, consumers,
                     log(f"{src} zip {shard:02d}: {len(extra)} ids not in the metadata CSV, "
                         f"skipped by every consumer: {extra[:5]}")
             write_text(marker(zip_dir, src, shard, "ready"), "")
-        wait_for(lambda: on_disk(shards) == 0, poll, wait_timeout, "consumers to finish", zip_dir)
+        wait_for(lambda: on_disk(shards) == 0 or stopped(zip_dir), poll, wait_timeout,
+                 "consumers to finish", zip_dir)
+        stats["stopped"] = stopped(zip_dir)
     except BaseException as e:
         if not aborted(zip_dir):  # keep the first reason (e.g. a consumer's)
             abort(zip_dir, f"{type(e).__name__}: {e}")
