@@ -16,8 +16,15 @@ Outputs in --out:
                       sequences for a per-country estimate)
   classes.json, test.csv, dev.csv, train.csv, config.json (skipped with --audit-only):
     test.csv   the full official test split; label = -1 for countries absent from train
-    dev.csv    --dev-n images (1 per sequence) from a seeded random --dev-creator-frac of the
-               creators; none of these creators is in train.csv (independent of --max-per-seq)
+    dev.csv    "dev_unseen": --dev-n images (1 per sequence) from a seeded random
+               --dev-creator-frac of the creators; none of these creators is in train.csv
+               (independent of --max-per-seq). Second report: generalization to new creators.
+    dev_seen.csv  --dev-seen-n images (1 per sequence) from seeded random sequences of the
+               other creators; those whole sequences leave the pool, and each creator keeps
+               at least one other sequence in the official train split. Mirrors the official
+               test (sequence-disjoint, 98% of test images have a creator seen in train);
+               hyperparameters are chosen on it (geo_eval.py). Unlike the official test it does
+               not enforce the 1 km distance to training images.
     train.csv  the training pool with two nested orderings:
                  nat_rank  seeded random order (natural, skewed country distribution)
                  bal_rank  round-robin over countries in nat order (as balanced as the data
@@ -37,6 +44,7 @@ Usage (Kaggle):
 
 import argparse
 import hashlib
+import itertools
 import json
 import sys
 from pathlib import Path
@@ -141,8 +149,25 @@ def subset(train: pd.DataFrame, strategy: str, n: int) -> pd.DataFrame:
     return train[train[f"{strategy}_rank"] < n]
 
 
+def pick_dev_seen(rest: pd.DataFrame, n: int, seed: int) -> pd.DataFrame:
+    """n seeded random sequences of `rest` (1 frame each), dropping a pick whose creator would
+    have no other sequence left in `rest` (so every dev_seen creator is seen in training)."""
+    chosen = cap_per_sequence(rest, 1, seed).sample(frac=1.0, random_state=seed).head(n)
+    left = set(rest.loc[~rest["sequence"].isin(set(chosen["sequence"])), "creator_id"])
+    return chosen[chosen["creator_id"].isin(left)]
+
+
+def subsets_nested(train: pd.DataFrame, sizes) -> bool:
+    """Every subset (nat and bal) is contained in the next larger one."""
+    for s in ("nat", "bal"):
+        ids = [set(subset(train, s, n)["id"]) for n in sorted(sizes)]
+        if not all(a <= b for a, b in itertools.pairwise(ids)):
+            return False
+    return True
+
+
 def build(tr: pd.DataFrame, te: pd.DataFrame, args: argparse.Namespace):
-    """(parts {train, dev, test}, classes, dropped) from normalized official metadata."""
+    """(parts {train, dev, dev_seen, test}, classes, dropped) from normalized official metadata."""
     classes = sorted(set(te["country"]) & set(tr["country"]))
     idx = {c: i for i, c in enumerate(classes)}
     tr = tr[tr["country"].isin(idx)]
@@ -154,11 +179,14 @@ def build(tr: pd.DataFrame, te: pd.DataFrame, args: argparse.Namespace):
     is_dev = creator_split(tr, args.dev_creator_frac, args.seed)
     dev = cap_per_sequence(tr[is_dev], 1, args.seed)
     dev = dev.sample(n=min(args.dev_n, len(dev)), random_state=args.seed)
-    pool = add_ranks(cap_per_sequence(tr[~is_dev], args.max_per_seq, args.seed), args.seed)
+    rest = tr[~is_dev]
+    dev_seen = pick_dev_seen(rest, args.dev_seen_n, args.seed)
+    rest = rest[~rest["sequence"].isin(set(dev_seen["sequence"]))]
+    pool = add_ranks(cap_per_sequence(rest, args.max_per_seq, args.seed), args.seed)
     n_max = max(args.sizes)
     pool = pool[(pool["nat_rank"] < n_max) | (pool["bal_rank"] < n_max)]
 
-    out = {"train": pool, "dev": dev, "test": te}
+    out = {"train": pool, "dev": dev, "dev_seen": dev_seen, "test": te}
     for name, d in out.items():
         out[name] = d.assign(label=d["country"].map(idx).fillna(-1).astype(int)).reset_index(drop=True)
     check_separation(out)
@@ -166,7 +194,7 @@ def build(tr: pd.DataFrame, te: pd.DataFrame, args: argparse.Namespace):
 
 
 def check_separation(parts: dict[str, pd.DataFrame]) -> None:
-    """No id or sequence shared by two parts; no creator shared by train and dev."""
+    """No id or sequence shared by two parts; no dev creator in train or dev_seen."""
     names = list(parts)
     for i, a in enumerate(names):
         for b in names[i + 1 :]:
@@ -174,8 +202,9 @@ def check_separation(parts: dict[str, pd.DataFrame]) -> None:
                 shared = set(parts[a][col]) & set(parts[b][col])
                 if shared:
                     raise AssertionError(f"{len(shared)} {col}s in both {a} and {b}")
-    if set(parts["dev"]["creator_id"]) & set(parts["train"]["creator_id"]):
-        raise AssertionError("dev and train share creators")
+    for other in ("train", "dev_seen"):
+        if other in parts and set(parts["dev"]["creator_id"]) & set(parts[other]["creator_id"]):
+            raise AssertionError(f"dev and {other} share creators")
 
 
 def main() -> None:
@@ -188,6 +217,7 @@ def main() -> None:
     ap.add_argument("--max-per-seq", type=int, default=3)
     ap.add_argument("--dev-creator-frac", type=float, default=0.02)
     ap.add_argument("--dev-n", type=int, default=20_000)
+    ap.add_argument("--dev-seen-n", type=int, default=20_000)
     ap.add_argument("--min-test-images", type=int, default=100, help="'reliable' country")
     ap.add_argument("--min-test-sequences", type=int, default=50, help="'reliable' country")
     ap.add_argument("--audit-only", action="store_true")
@@ -223,9 +253,14 @@ def main() -> None:
             for s in ("nat", "bal") for n in args.sizes
         },
         "ids_sha256": {name: ids_hash(sorted(d["id"])) for name, d in parts.items()},
+        "pool_size": len(train),
+        "subsets_nested": subsets_nested(train, args.sizes),
     }
+    if not config["subsets_nested"]:
+        raise AssertionError("training subsets are not nested")
     (args.out / "config.json").write_text(json.dumps(config, indent=2))
-    print(json.dumps({k: config[k] for k in ("n_classes", "n", "test_unlabelled",
+    print(json.dumps({k: config[k] for k in ("n_classes", "n", "pool_size", "subsets_nested",
+                                             "test_unlabelled",
                                              "train_rows_dropped_for_test_overlap", "subsets")}, indent=2))
 
 

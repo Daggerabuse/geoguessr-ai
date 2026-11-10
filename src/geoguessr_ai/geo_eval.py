@@ -1,9 +1,11 @@
 """V2/V3 heads on cached embeddings: kNN retrieval (country + coordinates) and a linear probe.
 
 For each training-subset size N (nested, see v2_data.py) and head:
-  - hyperparameters (k for kNN, the probe epoch) are chosen on dev only;
-  - dev is scored; the official test split is read and scored only with --eval-test
-    (final configurations), so development runs never touch it.
+  - hyperparameters (k for kNN, the probe epoch) are chosen on dev_seen only (creators seen
+    in train, like 98% of the official test; see v2_data.py);
+  - dev_seen and dev (creators unseen in train, second report) are scored; the official test
+    split is read and scored only with --eval-test (final configurations), so development
+    runs never touch it. The summary has one row per scored split.
 Every split is also reported per row group: countries with training data, reliable
 countries, head/middle/tail (country_counts.csv), photographer seen/unseen in the training
 subset. Groups select rows only; predictions always range over the full class list.
@@ -157,7 +159,8 @@ def text_head(model_name: str, classes: list[str], template: str):
 
 
 def probe_logits(feats, labels, dev_feats, dev_labels, eval_feats: dict, head_init, args, device):
-    """Train train.py's probe (cosine head, epoch chosen by dev top-1); return logits per split."""
+    """Train train.py's probe (cosine head, epoch chosen by top-1 on dev_feats, the
+    selection split); return logits per split."""
     import torch
     import torch.nn.functional as F
     from torch import nn
@@ -240,7 +243,7 @@ def run(args: argparse.Namespace) -> list[dict]:
     classes = json.loads((data / "classes.json").read_text())
     # keep_default_na=False everywhere: "NA" is Namibia, not a missing value
     counts = pd.read_csv(data / "country_counts.csv", index_col=0, keep_default_na=False)
-    splits = ("train", "dev", "test") if args.eval_test else ("train", "dev")
+    splits = ("train", "dev_seen", "dev", "test") if args.eval_test else ("train", "dev_seen", "dev")
     dfs, embs = {}, {}
     for name in splits:
         df = pd.read_csv(data / f"{name}.csv", dtype={"id": str, "sequence": str, "creator_id": str},
@@ -249,7 +252,7 @@ def run(args: argparse.Namespace) -> list[dict]:
         if not found.all():
             print(f"WARNING: {name}: {(~found).sum()} of {len(df)} ids not embedded, dropped")
         dfs[name], embs[name] = df[found].reset_index(drop=True), e[found]
-    train, dev, evals = dfs["train"], dfs["dev"], splits[1:]
+    train, sel, evals = dfs["train"], dfs["dev_seen"], splits[1:]  # sel: hyperparameter choice
     for name in evals:  # the kNN database / probe data must never contain evaluated images
         for col in ("id", "sequence"):
             if set(train[col]) & set(dfs[name][col]):
@@ -269,29 +272,29 @@ def run(args: argparse.Namespace) -> list[dict]:
             nbrs = {s: knn(embs[s], db, max(args.k), device=args.device) for s in evals}
             sweep = {}
             for k in args.k:
-                sc = knn_country_scores(*nbrs["dev"], lab, len(classes), k)
-                km = haversine(dev["latitude"].to_numpy(), dev["longitude"].to_numpy(),
-                               *knn_coordinates(*nbrs["dev"], lat, lon, k))
-                sweep[k] = {"dev_top1": float((sc.argmax(1) == dev["label"].to_numpy()).mean()),
-                            "dev_geoscore": float(geoscore(km).mean())}
-            k_c, k_g = pick(sweep, "dev_top1"), pick(sweep, "dev_geoscore")
+                sc = knn_country_scores(*nbrs["dev_seen"], lab, len(classes), k)
+                km = haversine(sel["latitude"].to_numpy(), sel["longitude"].to_numpy(),
+                               *knn_coordinates(*nbrs["dev_seen"], lat, lon, k))
+                sweep[k] = {"dev_seen_top1": float((sc.argmax(1) == sel["label"].to_numpy()).mean()),
+                            "dev_seen_geoscore": float(geoscore(km).mean())}
+            k_c, k_g = pick(sweep, "dev_seen_top1"), pick(sweep, "dev_seen_geoscore")
             out = root / f"{base}_knn"
-            res = {"k_sweep_dev": sweep, "k_country": k_c, "k_coords": k_g}
+            res = {"k_sweep_dev_seen": sweep, "k_country": k_c, "k_coords": k_g}
             for s in evals:
                 sc = knn_country_scores(*nbrs[s], lab, len(classes), k_c)
                 coords = knn_coordinates(*nbrs[s], lat, lon, k_g)
                 res[s] = score_split(out, s, dfs[s], sc, classes, coords, groups[s], args)
-            rows.append(finish(out, res, args, n, "knn"))
+            rows += finish(out, res, args, n, "knn", evals)
 
         if "probe" in args.heads:
             head = text_head(args.text_model or args.model, classes, args.template)
-            logits, history = probe_logits(db, lab, embs["dev"], dev["label"].to_numpy(),
+            logits, history = probe_logits(db, lab, embs["dev_seen"], sel["label"].to_numpy(),
                                            {s: embs[s] for s in evals}, head, args, args.device)
             out = root / f"{base}_probe"
             res = {"history": history}
             for s in evals:
                 res[s] = score_split(out, s, dfs[s], logits[s], classes, None, groups[s], args)
-            rows.append(finish(out, res, args, n, "probe"))
+            rows += finish(out, res, args, n, "probe", evals)
     summary = pd.DataFrame(rows)
     root.mkdir(parents=True, exist_ok=True)
     split = "test" if args.eval_test else "dev"
@@ -300,27 +303,29 @@ def run(args: argparse.Namespace) -> list[dict]:
     return rows
 
 
-def finish(out: Path, res: dict, args, n: int, head: str) -> dict:
-    """Write geo_metrics.json + run_config.json; one summary row (test if scored, else dev)."""
+def finish(out: Path, res: dict, args, n: int, head: str, splits) -> list[dict]:
+    """Write geo_metrics.json + run_config.json; one summary row per scored split."""
     out.mkdir(parents=True, exist_ok=True)
     (out / "geo_metrics.json").write_text(json.dumps(res, indent=2, default=float))
     (out / "run_config.json").write_text(json.dumps(
         {**vars(args), "n_train": n, "head": head, "versions": library_versions()},
         indent=2, default=str))
-    split = "test" if "test" in res else "dev"
-    t = res[split]
-    row = {"tag": args.tag, "strategy": args.strategy, "n_train": n, "head": head, "split": split}
-    for g in ("all", "reliable", "head", "middle", "tail", "seen_creator", "unseen_creator"):
-        if t.get(g, {}).get("n"):
-            row[f"{g}_top1"] = t[g]["country_top1"]["mean"]
-            row[f"{g}_macro_top1"] = t[g]["macro_top1"]
-            row[f"{g}_n"] = t[g]["n"]
-    a = t["all"]
-    row["all_top1_ci"] = (a["country_top1"]["ci_lo"], a["country_top1"]["ci_hi"])
-    row["all_top5"] = a["country_top5"]["mean"]
-    if "median_km" in a:
-        row.update({"median_km": a["median_km"], "geoscore": a["geoscore"]["mean"]})
-    return row
+    rows = []
+    for split in splits:
+        t = res[split]
+        row = {"tag": args.tag, "strategy": args.strategy, "n_train": n, "head": head, "split": split}
+        for g in ("all", "reliable", "head", "middle", "tail", "seen_creator", "unseen_creator"):
+            if t.get(g, {}).get("n"):
+                row[f"{g}_top1"] = t[g]["country_top1"]["mean"]
+                row[f"{g}_macro_top1"] = t[g]["macro_top1"]
+                row[f"{g}_n"] = t[g]["n"]
+        a = t["all"]
+        row["all_top1_ci"] = (a["country_top1"]["ci_lo"], a["country_top1"]["ci_hi"])
+        row["all_top5"] = a["country_top5"]["mean"]
+        if "median_km" in a:
+            row.update({"median_km": a["median_km"], "geoscore": a["geoscore"]["mean"]})
+        rows.append(row)
+    return rows
 
 
 def parse_args(argv=None) -> argparse.Namespace:

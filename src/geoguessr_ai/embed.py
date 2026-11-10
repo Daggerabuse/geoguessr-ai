@@ -1,7 +1,12 @@
 """Stream images from the OSV-5M shard zips, embed them with a frozen encoder, keep only embeddings.
 
-No image is written to disk: each needed image is read from its zip (range requests),
-preprocessed exactly like the model's CLIPImageProcessor (see clip_center_crop) and embedded.
+No image is written to disk: each needed image is read from its zip, preprocessed exactly
+like the model's CLIPImageProcessor (see clip_center_crop) and embedded. Two ways to read:
+  - remote (Phase 0): HTTP range requests per image; slow for sparse samples (each read
+    fetches a whole fsspec block), fine for small smoke tests;
+  - local zips (--zip-dir, Phase 1): zipq.py downloads each whole zip once; this process
+    waits for its ready marker, embeds the wanted ids in it, saves, then writes its own
+    done marker so the zip can be deleted (see run_zips). Bytes are identical either way.
 
 Cache layout (one directory per encoder, e.g. emb/clip_b16/):
   encoder.json                        model, image size, embedding dim, preprocessing, GPU
@@ -33,6 +38,10 @@ Usage (Kaggle; the second command runs in a second process on the second T4):
   python -m geoguessr_ai.embed ... --parts 2 --part 1 --device cuda:1
   # smoke test / throughput benchmark: a seeded random sample of 2000 training images
   python -m geoguessr_ai.embed --ids /kaggle/working/v2/train.csv --source train ... --limit 2000
+  # local-zip consumer (one long-lived process per encoder; see scripts/kaggle_pilot.sh)
+  python -m geoguessr_ai.embed --ids v2/train.csv v2/dev.csv v2/dev_seen.csv --source train \
+      --model geolocal/StreetCLIP --out emb/streetclip --batch-size 64 --device cuda:1 \
+      --zip-dir /kaggle/temp/zips --index-dir emb/zip_index --shards 0 1 2
   # verify a cache: every target id exactly once; optionally the same embeddings as another cache
   python -m geoguessr_ai.embed --check --ids ... --source train --out DIR --limit 2000 [--reference DIR2]
 
@@ -62,6 +71,13 @@ from PIL import Image
 from geoguessr_ai.baseline_clip import as_embedding, library_versions
 from geoguessr_ai.prep_data import build_index, make_opener
 from geoguessr_ai.train import tiny_vision_config, to_tensor_array
+from geoguessr_ai.zipq import (
+    atomic_write,
+    load_zip_index,
+    marker,
+    wait_ready,
+    write_text,
+)
 
 DONE = object()
 PREPROCESSING = "clip_image_processor: shortest edge (int), bicubic, center crop, CLIP mean/std"
@@ -116,17 +132,6 @@ def load_embeddings(out: Path, ids, source: str) -> tuple[np.ndarray, np.ndarray
     # fp16 storage rounds the unit norm by up to ~1e-3; renormalize so dot product == cosine
     emb[found] /= np.linalg.norm(emb[found], axis=1, keepdims=True)
     return emb, found
-
-
-def atomic_write(path: Path, write) -> None:
-    """write(file) into a temp file next to path (not matching *.npz/*.json), then rename."""
-    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        with open(tmp, "wb") as f:
-            write(f)
-        os.replace(tmp, path)
-    finally:
-        tmp.unlink(missing_ok=True)
 
 
 def save_npz(path: Path, ids: list[str], emb: np.ndarray, failed: list[str]) -> None:
@@ -260,20 +265,65 @@ def gpu_utilization(device) -> float | None:
         return None
 
 
-def run(args: argparse.Namespace) -> dict:
+def embed_jobs(jobs, opener, args, enc: dict, meter: dict) -> set[str]:
+    """Embed [(shard, items)] (several jobs may share a shard: one producer thread each) and
+    save one .npz per shard once all its jobs are done. Returns the ids embedded or recorded
+    as failed (corrupt image); ids of a job whose zip read failed are in neither."""
     import torch
 
-    torch.manual_seed(args.seed)
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    args.out.mkdir(parents=True, exist_ok=True)
-    vision, size, dim = load_encoder(args.model, args.smoke, device)
-    gpu = torch.cuda.get_device_name(device) if device.type == "cuda" else "cpu"
-    check_encoder(args.out, {"model": args.model, "smoke": args.smoke, "image_size": size,
-                             "dim": dim, "dtype": "float16", "preprocessing": PREPROCESSING,
-                             "gpu": gpu})
+    vision, device, size, dim = enc["vision"], enc["device"], enc["size"], enc["dim"]
+    left = collections.Counter(s for s, _ in jobs)
+    acc: dict[int, tuple[list, list, list]] = {s: ([], [], []) for s in left}
+    q: queue.Queue = queue.Queue(maxsize=args.workers + 2)
+    stop = threading.Event()
+    done: set[str] = set()
+    n_todo = meter["n_done"] + sum(len(items) for _, items in jobs)
+    pool = ThreadPoolExecutor(args.workers)
+    try:
+        for s, items in jobs:
+            pool.submit(shard_batches, opener, args.source, s, items, size, args.batch_size, q,
+                        stop, meter["timings"])
+        remaining = len(jobs)
+        while remaining:
+            shard, ids, x, failed = q.get()
+            if ids is DONE:
+                remaining -= 1
+                left[shard] -= 1
+                if left[shard] == 0:
+                    got_ids, embs, fails = acc.pop(shard)
+                    if got_ids or fails:
+                        emb = np.concatenate(embs) if embs else np.zeros((0, dim), np.float16)
+                        save_npz(args.out / f"{args.source}_{shard:02d}_{enc['run_id']}.npz",
+                                 got_ids, emb, fails)
+                        done.update(got_ids, fails)
+                continue
+            acc[shard][2].extend(failed)
+            if x is None:
+                continue
+            t1 = time.time()
+            with torch.inference_mode():
+                px = torch.from_numpy(x).to(device, dtype=vision.dtype, non_blocking=True)
+                e = as_embedding(vision(pixel_values=px), "image", dim).float()
+                e = torch.nn.functional.normalize(e, dim=-1).half().cpu().numpy()
+            meter["t_gpu"] += time.time() - t1
+            if device.type == "cuda":
+                meter["util"].append(gpu_utilization(device))
+            acc[shard][0].extend(ids)
+            acc[shard][1].append(e)
+            meter["n_done"] += len(ids)
+            el = time.time() - meter["t0"]
+            if meter["first"] is None:  # warm-up (CUDA init, first reads) left out of the steady rate
+                meter["first"] = (meter["n_done"], el)
+            print(f"  {meter['n_done']}/{n_todo}  {meter['n_done'] / el:.1f} img/s  "
+                  f"gpu busy {meter['t_gpu'] / el:.0%}", end="\r")
+    finally:
+        stop.set()  # unblocks producers if the loop above failed (e.g. out of GPU memory)
+        pool.shutdown(wait=True, cancel_futures=True)
+    return done
 
-    want = read_ids(args.ids)
-    cached = cached_ids(args.out, args.source)
+
+def run_remote(args, want, cached: set[str], enc: dict, meter: dict) -> dict:
+    """Range-request mode (Phase 0): the shared index of all shards, --parts/--limit."""
     opener = make_opener(args.local_zips)
     t_index = time.time()
     index = shared_index(opener, args.source, args.out.parent / f"index_{args.source}.json",
@@ -286,58 +336,75 @@ def run(args: argparse.Namespace) -> dict:
     print(f"target: {len(target)} unique ids (--limit {args.limit or 'none'}, all parts together); "
           f"part {args.part}/{args.parts}: {in_part} unique ids in its shards, "
           f"{in_part - n_todo} already cached, {n_todo} to embed ({len(by_shard)} shards)")
+    meter["t0"] = time.time()
+    embed_jobs(list(by_shard.items()), opener, args, enc, meter)
+    return {"target": len(target), "index_seconds": round(t_index, 1)}
 
-    q: queue.Queue = queue.Queue(maxsize=args.workers + 2)
-    stop = threading.Event()
-    acc: dict[int, tuple[list, list, list]] = {s: ([], [], []) for s in by_shard}
-    timings: list = []
-    t0, t_gpu, n_done, util, first = time.time(), 0.0, 0, [], None
+
+def run_zips(args, want, cached: set[str], enc: dict, meter: dict) -> dict:
+    """Local-zip mode: wait for each --shards zip (zipq.py), embed the wanted ids in it with
+    --workers producer threads, save, then write this consumer's done marker. A run killed
+    mid-zip saves nothing for that zip and writes no marker, so the zip stays on disk and a
+    restart embeds it again (ids saved by an earlier run are skipped)."""
+    opener = make_opener(args.zip_dir / "images")
+    wanted, target = set(map(str, want)), 0
+    meter["t0"] = time.time()
+    for shard in args.shards:
+        done_marker = marker(args.zip_dir, args.source, shard, f"{args.consumer}.done")
+        if done_marker.exists():
+            target += sum(i in wanted for i in load_zip_index(args.index_dir, args.source, [shard]))
+            continue
+        t = time.time()
+        wait_ready(args.zip_dir, args.source, shard, args.poll, args.wait_timeout)
+        meter["wait_seconds"] += time.time() - t
+        mine = sorted((i, n) for i, (_, n) in
+                      load_zip_index(args.index_dir, args.source, [shard]).items() if i in wanted)
+        target += len(mine)
+        items = [(i, n) for i, n in mine if i not in cached]
+        if items:
+            w = max(1, min(args.workers, len(items)))
+            done = embed_jobs([(shard, items[k::w]) for k in range(w)], opener, args, enc, meter)
+            lost = {i for i, _ in items} - done
+            if lost:
+                raise RuntimeError(f"{args.source} zip {shard:02d}: {len(lost)} ids neither "
+                                   "embedded nor recorded as failed; not marking it done")
+            cached |= done
+        write_text(done_marker, "")
+        print(f"\n{args.source} zip {shard:02d}: {len(mine)} wanted ids, {len(items)} embedded now")
+    return {"target": target, "shards": list(args.shards),
+            "wait_seconds": round(meter["wait_seconds"], 1)}
+
+
+def run(args: argparse.Namespace) -> dict:
+    import torch
+
+    torch.manual_seed(args.seed)
+    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    args.out.mkdir(parents=True, exist_ok=True)
+    vision, size, dim = load_encoder(args.model, args.smoke, device)
+    gpu = torch.cuda.get_device_name(device) if device.type == "cuda" else "cpu"
+    check_encoder(args.out, {"model": args.model, "smoke": args.smoke, "image_size": size,
+                             "dim": dim, "dtype": "float16", "preprocessing": PREPROCESSING,
+                             "gpu": gpu})
     run_id = f"{time.strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
-    pool = ThreadPoolExecutor(args.workers)
-    try:
-        for s, items in by_shard.items():
-            pool.submit(shard_batches, opener, args.source, s, items, size, args.batch_size, q,
-                        stop, timings)
-        remaining = len(by_shard)
-        while remaining:
-            shard, ids, x, failed = q.get()
-            if ids is DONE:
-                remaining -= 1
-                got_ids, embs, fails = acc.pop(shard)
-                if got_ids or fails:
-                    emb = np.concatenate(embs) if embs else np.zeros((0, dim), np.float16)
-                    save_npz(args.out / f"{args.source}_{shard:02d}_{run_id}.npz", got_ids, emb, fails)
-                continue
-            acc[shard][2].extend(failed)
-            if x is None:
-                continue
-            t1 = time.time()
-            with torch.inference_mode():
-                px = torch.from_numpy(x).to(device, dtype=vision.dtype, non_blocking=True)
-                e = as_embedding(vision(pixel_values=px), "image", dim).float()
-                e = torch.nn.functional.normalize(e, dim=-1).half().cpu().numpy()
-            t_gpu += time.time() - t1
-            if device.type == "cuda":
-                util.append(gpu_utilization(device))
-            acc[shard][0].extend(ids)
-            acc[shard][1].append(e)
-            n_done += len(ids)
-            el = time.time() - t0
-            if first is None:  # warm-up (CUDA init, first zip reads) left out of the steady rate
-                first = (n_done, el)
-            print(f"  {n_done}/{n_todo}  {n_done / el:.1f} img/s  gpu busy {t_gpu / el:.0%}", end="\r")
-    finally:
-        stop.set()  # unblocks producers if the loop above failed (e.g. out of GPU memory)
-        pool.shutdown(wait=True, cancel_futures=True)
-    elapsed = time.time() - t0
-    util = [u for u in util if u is not None]
+    enc = {"vision": vision, "device": device, "size": size, "dim": dim, "run_id": run_id}
+    meter = {"t0": time.time(), "t_gpu": 0.0, "n_done": 0, "util": [], "first": None,
+             "timings": [], "wait_seconds": 0.0}
+    want = read_ids(args.ids)
+    cached = cached_ids(args.out, args.source)
+    mode = (run_zips if args.zip_dir else run_remote)(args, want, cached, enc, meter)
+
+    elapsed, n_done, t_gpu, first = (time.time() - meter["t0"], meter["n_done"], meter["t_gpu"],
+                                     meter["first"])
+    util = [u for u in meter["util"] if u is not None]
+    timings = meter["timings"]
     t_read, t_prep = (sum(c) for c in zip(*timings)) if timings else (0.0, 0.0)
     steady = first is not None and n_done > first[0] and elapsed > first[1]
     stats = {
         "run_id": run_id, "model": args.model, "source": args.source, "device": str(device),
         "gpu_name": gpu, "image_size": size, "dim": dim, "batch_size": args.batch_size,
         "workers": args.workers, "part": f"{args.part}/{args.parts}", "limit": args.limit,
-        "target": len(target), "images": n_done, "index_seconds": round(t_index, 1),
+        "mode": "zips" if args.zip_dir else "remote", **mode, "images": n_done,
         "seconds": round(elapsed, 1),
         "images_per_s": round(n_done / elapsed, 2) if elapsed else None,
         "images_per_s_after_first_batch":
@@ -358,16 +425,23 @@ def run(args: argparse.Namespace) -> dict:
     return stats
 
 
-def read_ids(path: Path) -> pd.Series:
-    return pd.read_csv(path, usecols=["id"], dtype={"id": str}, keep_default_na=False)["id"]
+def read_ids(paths) -> pd.Series:
+    """The 'id' column of one or several CSVs."""
+    paths = [paths] if isinstance(paths, (str, Path)) else paths
+    return pd.concat([pd.read_csv(p, usecols=["id"], dtype={"id": str}, keep_default_na=False)["id"]
+                      for p in paths], ignore_index=True)
 
 
 def check(args: argparse.Namespace) -> dict:
     """Is every target id in the cache exactly once, and nothing else? With --reference: are
     the embeddings of the same ids the same (fp16 tolerance) in that other cache?"""
-    index = build_index(make_opener(args.local_zips), args.source,
-                        args.out.parent / f"index_{args.source}.json", args.workers)
-    target = set(target_ids(read_ids(args.ids), index, args.limit, args.seed))
+    if args.zip_dir:  # local-zip mode: the per-zip indexes of --shards
+        index = load_zip_index(args.index_dir, args.source, args.shards)
+        target = set(map(str, read_ids(args.ids))) & index.keys()
+    else:
+        index = build_index(make_opener(args.local_zips), args.source,
+                            args.out.parent / f"index_{args.source}.json", args.workers)
+        target = set(target_ids(read_ids(args.ids), index, args.limit, args.seed))
     files = cache_files(args.out, args.source)
     counts = collections.Counter(str(i) for f in files for i in np.load(f)["ids"])
     failed = {str(i) for f in files for i in np.load(f)["failed"]}
@@ -397,7 +471,8 @@ def check(args: argparse.Namespace) -> dict:
 
 def parse_args(argv=None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--ids", type=Path, required=True, help="CSV with an 'id' column")
+    ap.add_argument("--ids", type=Path, nargs="+", required=True,
+                    help="CSV(s) with an 'id' column (e.g. train.csv dev.csv dev_seen.csv)")
     ap.add_argument("--source", choices=["train", "test"], required=True, help="which shard zips")
     ap.add_argument("--model", default="openai/clip-vit-base-patch16")
     ap.add_argument("--out", type=Path, required=True, help="embedding cache dir (one per encoder)")
@@ -411,6 +486,14 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--smoke", action="store_true", help="tiny random model (no weights download)")
     ap.add_argument("--local-zips", type=Path, help="DIR/{train,test}/NN.zip (for testing)")
+    ap.add_argument("--zip-dir", type=Path,
+                    help="local-zip mode: wait for zips downloaded by zipq.py into this dir")
+    ap.add_argument("--index-dir", type=Path, help="local-zip mode: zipq.py's per-zip indexes")
+    ap.add_argument("--shards", type=int, nargs="+", help="local-zip mode: zips, in order")
+    ap.add_argument("--consumer", help="local-zip mode: marker name (default: --out's name)")
+    ap.add_argument("--poll", type=float, default=5, help="local-zip mode: seconds")
+    ap.add_argument("--wait-timeout", type=float, default=7200,
+                    help="local-zip mode: give up after waiting this long for one zip")
     ap.add_argument("--check", action="store_true",
                     help="verify the cache in --out instead of embedding (exit 1 on failure)")
     ap.add_argument("--reference", type=Path, help="--check: compare embeddings with this cache")
@@ -419,6 +502,12 @@ def parse_args(argv=None) -> argparse.Namespace:
     args = ap.parse_args(argv)
     if not 0 <= args.part < args.parts:
         ap.error("--part must be in [0, --parts)")
+    if args.zip_dir:
+        if not (args.index_dir and args.shards):
+            ap.error("--zip-dir needs --index-dir and --shards")
+        if args.limit or args.parts != 1 or args.local_zips:
+            ap.error("--zip-dir excludes --limit, --parts and --local-zips")
+        args.consumer = args.consumer or args.out.name
     return args
 
 

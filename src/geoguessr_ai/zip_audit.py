@@ -134,9 +134,10 @@ def main() -> None:
     args.out.mkdir(parents=True, exist_ok=True)
     res: dict = {"cpu_count": os.cpu_count()}
 
-    def save():
+    def save(final: bool = False):  # the file after every step, the console once at the end
         (args.out / "zip_audit.json").write_text(json.dumps(res, indent=2))
-        print(json.dumps(res, indent=2))
+        if final:
+            print(json.dumps(res, indent=2))
 
     # 1. randomness (the index keeps each zip's central-directory order)
     tr = read_meta(get_csv("train.csv", args.train_csv, args.raw.parent))
@@ -151,6 +152,7 @@ def main() -> None:
     # 2. download speed
     free = shutil.disk_usage(args.zips.parent if args.zips.parent.exists() else "/").free / 1e9
     if free < args.min_free_gb:
+        save(final=True)
         sys.exit(f"only {free:.0f} GB free next to {args.zips}; need {args.min_free_gb}")
     res["disk_free_gb_before"] = round(free, 1)
     res["download_one"] = download(0, args.zips)
@@ -180,7 +182,7 @@ def main() -> None:
         for sizes in ((224,), (336,), (224, 336)) for p in (1, procs)}
     if not args.keep_zips:
         shutil.rmtree(args.zips)
-    save()
+    save(final=True)
     if res["bytes_equal"]["equal"] != res["bytes_equal"]["n"]:
         sys.exit("FAILED: range-request bytes differ from the downloaded zip")
 

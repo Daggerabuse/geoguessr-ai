@@ -29,7 +29,8 @@ def _meta(prefix: str, countries=("AA", "BB", "CC"), sizes=(60, 20, 4), per_seq=
 
 
 def _args(**kw):
-    base = {"sizes": [30, 90], "max_per_seq": 3, "dev_creator_frac": 0.2, "dev_n": 20, "seed": 42}
+    base = {"sizes": [30, 90], "max_per_seq": 3, "dev_creator_frac": 0.2, "dev_n": 20,
+            "dev_seen_n": 8, "seed": 42}
     return argparse.Namespace(**{**base, **kw})
 
 
@@ -81,6 +82,29 @@ def test_build_classes_dev_and_nested_subsets():
         small, big = set(v.subset(tr, s, 30)["id"]), set(v.subset(tr, s, 90)["id"])
         assert len(small) == 30 and small < big  # nested
     assert v.subset(tr, "bal", 12)["country"].value_counts().to_dict() == {"AA": 4, "BB": 4, "CC": 4}
+    assert v.subsets_nested(tr, [30, 90])
+
+
+def test_subsets_nested_detects_independent_samples(monkeypatch):
+    parts, _, _ = v.build(_meta("t"), _meta("x"), _args())
+    monkeypatch.setattr(v, "subset", lambda t, s, n: t.sample(n=n, random_state=n))
+    assert not v.subsets_nested(parts["train"], [30, 90])
+
+
+def test_dev_seen_is_disjoint_one_per_sequence_seen_creators_and_seeded():
+    tr = _meta("t", sizes=(60, 20, 4))
+    a, _, _ = v.build(tr, _meta("x"), _args(sizes=[10**6]))
+    b, _, _ = v.build(tr, _meta("x"), _args(sizes=[10**6]))
+    ds, dev, pool = a["dev_seen"], a["dev"], a["train"]
+    assert 0 < len(ds) <= 8 and ds["id"].tolist() == b["dev_seen"]["id"].tolist()
+    assert ds.groupby("sequence").size().max() == 1
+    v.check_separation(a)  # no shared id/sequence with train, dev, test
+    assert not set(ds["creator_id"]) & set(dev["creator_id"])
+    rest = tr[~tr["sequence"].isin(set(ds["sequence"]) | set(dev["sequence"]))]
+    assert set(ds["creator_id"]) <= set(rest["creator_id"])  # each creator still in train
+    assert set(ds["creator_id"]) <= set(pool["creator_id"])  # full pool: seen there too
+    lonely = _meta("t", sizes=(30, 0, 0)).assign(creator_id=lambda d: d["sequence"])  # 1 seq each
+    assert v.pick_dev_seen(lonely, 5, 0).empty  # no creator would remain in train
 
 
 def test_build_drops_train_rows_overlapping_test():
@@ -434,7 +458,7 @@ def test_end_to_end_dev_only_then_test(tmp_path, monkeypatch):
     parts = _write_data(data, tr, te, sizes=[20, 40], dev_n=10)
 
     emb = tmp_path / "emb" / "m"
-    for name, src in (("train", "train"), ("dev", "train"), ("test", "test")):
+    for name, src in (("train", "train"), ("dev", "train"), ("dev_seen", "train"), ("test", "test")):
         e.run(e.parse_args(["--ids", str(data / f"{name}.csv"), "--source", src, "--out", str(emb),
                             "--smoke", "--device", "cpu", "--workers", "2", "--batch-size", "8",
                             "--local-zips", str(tmp_path / "zips")]))
@@ -442,7 +466,9 @@ def test_end_to_end_dev_only_then_test(tmp_path, monkeypatch):
               "--heads", "knn", "--k", "1", "5", "--device", "", "--n-boot", "50",
               "--results-dir", str(tmp_path / "res")]
     rows = g.run(g.parse_args(common))
-    assert [r["split"] for r in rows] == ["dev", "dev"]
+    assert [r["split"] for r in rows] == ["dev_seen", "dev"] * 2  # selection split first
+    sweep = json.loads((tmp_path / "res" / "smoke_bal_40_knn" / "geo_metrics.json").read_text())
+    assert "k_sweep_dev_seen" in sweep and "dev" in sweep and "test" not in sweep
     assert not list((tmp_path / "res").rglob("test_*"))  # official test untouched in development
 
     rows = g.run(g.parse_args([*common, "--eval-test"]))
@@ -451,7 +477,7 @@ def test_end_to_end_dev_only_then_test(tmp_path, monkeypatch):
     assert m["test"]["class_in_train"]["n"] == len(parts["test"]) - 3  # ...and countable apart
     assert m["test"]["seen_creator"]["n"] == 0
     assert 0 <= m["test"]["all"]["geoscore"]["mean"] <= 5000
-    assert rows[0]["split"] == "test"
+    assert [r["split"] for r in rows[:3]] == ["dev_seen", "dev", "test"]
 
 
 def test_geo_eval_refuses_overlapping_train_and_dev(tmp_path):
@@ -461,7 +487,7 @@ def test_geo_eval_refuses_overlapping_train_and_dev(tmp_path):
         .to_csv(data / "train.csv", index=False)
     emb = tmp_path / "emb"
     emb.mkdir()
-    ids = pd.concat([parts["train"]["id"], parts["dev"]["id"]]).tolist()
+    ids = pd.concat([parts[s]["id"] for s in ("train", "dev", "dev_seen")]).tolist()
     e.save_npz(emb / "train_00_x.npz", ids, np.ones((len(ids), 4)), failed=[])
     with pytest.raises(AssertionError, match="share"):
         g.run(g.parse_args(["--data", str(data), "--emb", str(emb), "--tag", "t", "--sizes", "10",

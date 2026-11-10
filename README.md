@@ -293,9 +293,14 @@ written to `audit.json` by the audit step.
 
 **Splits.** `train.csv`: the training pool, at most 3 frames per sequence, with two nested
 orderings (`nat_rank`: natural distribution, `bal_rank`: country round-robin); a subset of
-size N is `rank < N`, so smaller subsets are contained in larger ones. `dev.csv`: images
-(1 per sequence) from a seeded 2% of the photographers, none of whom is in `train.csv`; all
-choices (k, probe epoch) are made on dev. `test.csv`: the full official test split. It is
+size N is `rank < N`, so smaller subsets are contained in larger ones. `dev_seen.csv`:
+20K images (1 per sequence) from seeded random sequences of photographers who keep other
+sequences in train, like 98% of the official test images; these sequences leave the pool,
+and all choices (k, probe epoch) are made on dev_seen. Unlike the official test, it does not
+enforce a 1 km distance to training images. `dev.csv` ("dev_unseen", second report): images
+(1 per sequence) from a seeded 2% of the photographers, none of whom is in `train.csv`, so
+it measures generalization to new photographers and scores lower than test by design.
+`test.csv`: the full official test split. It is
 scored only with `geo_eval --eval-test` (final configurations), and no smoke test or
 benchmark reads it. Train rows sharing an id or a sequence with test are dropped (counted
 in `config.json`).
@@ -320,6 +325,29 @@ id exactly once, and with `--reference` the same embeddings as another cache.
 `scripts/kaggle_phase0.sh` runs the whole validation session on Kaggle (audit, throughput
 of each backbone, 2,000-image smoke test, dual-T4 run with an interrupted and resumed part);
 it stops at the first failed check.
+
+**Phase 1 reading (local zips).** Sparse range reads were network-bound in Phase 0, so the
+full run downloads each of the 98 train zips once (`zipq.py`: one stream at a time, at most
+2 zips ahead, a zip deleted when all consumers marked it done, at least 20 GB free required
+before each download). One long-lived `embed.py --zip-dir` process per backbone reads the
+same local zip; `ft_archive.py` copies the fine-tuning images (nat_200K, dev, dev_seen) byte
+for byte into ~1 GB ZIP_STORED parts with a sha256 manifest and uploads them to a private
+Kaggle Dataset. `scripts/kaggle_pilot.sh` tries this end to end on
+3 zips (all backbones, checks, upload, quota timestamps, 40-minute deadline).
+
+Pilot notebook (2x T4, internet on). Cell 1 (secrets from Kaggle Secrets, never printed):
+```python
+import os
+from kaggle_secrets import UserSecretsClient
+s = UserSecretsClient()
+for k in ("HF_TOKEN", "KAGGLE_USERNAME", "KAGGLE_KEY"):
+    os.environ[k] = s.get_secret(k)
+```
+Cell 2:
+```
+!git clone <repo url> /kaggle/working/geoguessr-ai && cd /kaggle/working/geoguessr-ai && pip install -q -e .
+!cd /kaggle/working/geoguessr-ai && bash scripts/kaggle_pilot.sh 2>&1 | tee /kaggle/working/pilot.log
+```
 
 ```
 # audit only (countries, overlap, groups), then the manifests
