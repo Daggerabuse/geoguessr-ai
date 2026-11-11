@@ -8,6 +8,8 @@
 Modes:
   pilot  3 train zips, 40 min deadline, uploads only to a *-pilot repo
   full   all 98 train zips, 11 h deadline, uploads only to FULL_REPO
+  test   the 5 official test zips (embeddings only, no upload), 4 h deadline; refuses to start
+         unless the pre-registration (prereg.py) is committed
 """
 
 import argparse
@@ -23,22 +25,27 @@ from geoguessr_ai.zipq import aborted, load_zip_index, marker, stopped
 
 FULL_REPO = "Daggerabuse/osv5m-ft-archive"
 PILOT_REPO = FULL_REPO + "-pilot"
-N_TRAIN_ZIPS = 98
+N_TRAIN_ZIPS, N_TEST_ZIPS = 98, 5
 MODES = {
     "pilot": {"shards": [0, 1, 2], "deadline_min": 40, "repo": PILOT_REPO, "out": "pilot"},
     "full": {"shards": list(range(N_TRAIN_ZIPS)), "deadline_min": 660, "repo": FULL_REPO,
              "out": "full"},
+    "test": {"shards": list(range(N_TEST_ZIPS)), "deadline_min": 240, "repo": "", "out": "test",
+             "source": "test"},
 }
 
 
 def check_repo(mode: str, repo: str) -> None:
-    """The pilot never touches the main archive; the full run touches nothing but it."""
+    """The pilot never touches the main archive; the full run touches nothing but it; the
+    test run uploads nothing."""
     if mode not in MODES:
         raise SystemExit(f"unknown mode {mode}; use one of {sorted(MODES)}")
     if mode == "pilot" and not repo.endswith("-pilot"):
         raise SystemExit(f"pilot mode only uploads to a *-pilot repo, not {repo}")
     if mode == "full" and repo != FULL_REPO:
         raise SystemExit(f"full mode only uploads to {FULL_REPO}, not {repo}")
+    if mode == "test" and repo:
+        raise SystemExit(f"test mode uploads nothing, not to {repo}")
 
 
 def config(mode: str) -> str:
@@ -46,7 +53,7 @@ def config(mode: str) -> str:
     m = MODES[mode]
     shell = {"MODE": mode, "SHARDS": " ".join(map(str, m["shards"])),
              "DEADLINE_MIN": os.environ.get("DEADLINE_MIN", m["deadline_min"]),
-             "REPO": m["repo"], "OUT_NAME": m["out"]}
+             "REPO": m["repo"], "OUT_NAME": m["out"], "SOURCE": m.get("source", "train")}
     return "\n".join(f"{k}={shlex.quote(str(v))}" for k, v in shell.items())
 
 

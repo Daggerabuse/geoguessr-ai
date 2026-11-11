@@ -331,7 +331,8 @@ def train_probe(model, feats, labels, val_feats, val_labels, args, device, histo
         if patience and bad >= patience:
             print(f"[probe] early stop at epoch {ep}: no gain for {patience} epochs")
             break
-    model.head.data.copy_(best_head)
+    if getattr(args, "probe_restore_best", True):  # False: a fixed epoch count, last head kept
+        model.head.data.copy_(best_head)
     print(f"[probe] best val_top1={best:.4f}")
 
 

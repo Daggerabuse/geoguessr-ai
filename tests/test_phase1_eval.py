@@ -9,6 +9,7 @@ import pytest
 from geoguessr_ai import embed as e
 from geoguessr_ai import geo_eval as g
 from geoguessr_ai import phase1_eval as pe
+from geoguessr_ai import prereg
 from tests.test_v2 import _meta, _write_data
 
 NOISE = {"streetclip": 0.3, "clip_l14_336": 1.5, "clip_b16": 2.0}  # streetclip separates best
@@ -95,12 +96,211 @@ def test_finished_cells_are_skipped_and_a_missing_one_is_redone(setup, monkeypat
                                   check_exact=False, atol=1e-12)
 
 
-def test_eval_test_writes_to_a_separate_directory(setup):
+def _git(repo, *a):
+    import subprocess
+
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", *a],
+                   check=True, capture_output=True)
+
+
+@pytest.fixture
+def final(setup):
+    """A finished dev run, its committed pre-registration and the provenance of a test
+    embedding run (the synthetic test caches sit in emb/ next to the train caches)."""
+    import shutil
+
+    if shutil.which("git") is None:
+        pytest.skip("needs git")
     root, args = setup
-    table = pe.run(pe.parse_args([*args, "--backbones", "streetclip", "--methods", "knn",
-                                  "--eval-test"]))
-    assert "test_top1" in table and (root / "res_test" / "results.csv").exists()
-    assert not (root / "res").exists()
+    dev = pe.run(pe.parse_args(args))
+    repo = root / "repo"
+    path = repo / "configs" / "phase1_final.json"
+    prereg.write(root / "res", path, pe.parse_args(args))
+    _git(repo.parent, "init", "-q", str(repo))
+    _git(repo, "add", "configs/phase1_final.json")
+    _git(repo, "commit", "-q", "-m", "pre-register")
+    prereg.provenance(path, root / "emb" / "prereg_provenance.json")
+    final_args = [*args, "--eval-test", "--prereg", str(path), "--test-emb-root", str(root / "emb")]
+    return root, args, final_args, dev, path
+
+
+def _tree(d):
+    return {str(f.relative_to(d)): f.read_bytes() for f in sorted(d.rglob("*")) if f.is_file()}
+
+
+def test_prereg_declares_primary_hypotheses(final):
+    *_, path = final
+    h = json.loads(path.read_text())["hypotheses"]
+    ids = {p["id"] for p in h["primary"]}
+    assert ids == {f"{x}/{v}/{o}" for x in ("H1", "H2") for o in ("nat", "bal")
+                   for v in ("knn", "probe_random", "probe_zeroshot")}
+    assert {p["n"] for p in h["primary"] if p["quantity"] == "gap"} == {30}  # smallest N
+    assert {(p["n_small"], p["n_large"]) for p in h["primary"] if p["quantity"] == "shrink"} == {(30, 90)}
+    assert "exploratory" in h["secondary"] and "Holm" in h["criterion"] + h["multiplicity"]
+    assert h["alpha"] == 0.05 and h["n_boot"] >= 10_000
+    # a variant without both backbones of the pair gets no hypothesis
+    cells = [c for c in json.loads(path.read_text())["cells"]
+             if not (c["variant"] == "knn" and c["backbone"] == "clip_l14_336")]
+    assert not any("/knn/" in p["id"] for p in prereg.hypotheses(cells, pe.PAIR)["primary"])
+
+
+def test_one_sided_bootstrap_p_value():
+    assert pe.one_sided_p(np.array([0.1, 0.2, 0.3])) == pytest.approx(1 / 4)  # none <= 0: never 0
+    assert pe.one_sided_p(np.array([-0.1, 0.0, 0.3, 0.4])) == pytest.approx(3 / 5)  # 0 counts
+    assert pe.one_sided_p(np.full(9, -1.0)) == pytest.approx(1.0)
+    means = g.bootstrap_means(np.r_[np.ones(30), np.zeros(10)], np.arange(40), 10_000, 0)
+    assert len(means) == 10_000 and pe.one_sided_p(means) == pytest.approx(1 / 10_001)
+
+
+def test_bootstrap_means_in_chunks_is_the_same_stream():
+    v, c = np.random.default_rng(0).normal(size=60), np.arange(60) // 3
+    np.testing.assert_allclose(g.bootstrap_means(v, c, 450, 1, chunk=7),
+                               g.bootstrap_means(v, c, 450, 1, chunk=1000), rtol=1e-12, atol=1e-15)
+
+
+def test_holm_ordering_and_adjustment():
+    # sorted: 0.01*4=0.04, 0.02*3=0.06, 0.03*2=0.06, 0.04*1=0.04 -> monotone 0.04 0.06 0.06 0.06
+    adj = pe.holm([0.03, 0.01, 0.04, 0.02])
+    np.testing.assert_allclose(adj, [0.06, 0.04, 0.06, 0.06])  # returned in input order
+    np.testing.assert_allclose(pe.holm([0.5, 0.9]), [1.0, 1.0])  # capped at 1
+    np.testing.assert_allclose(pe.holm([0.001, 0.2, 1.0]), [0.003, 0.4, 1.0])
+    # Holm step-down: the second hypothesis is tested at alpha/(m-1), not alpha/m
+    p = [0.012, 0.024, 0.9]  # Bonferroni (x3) would reject only the first
+    assert (pe.holm(p) < 0.05).tolist() == [True, True, False]
+
+
+def test_primary_results_holm_verdicts(tmp_path):
+    ids = [str(i) for i in range(200)]
+    (tmp_path / "test.csv").write_text("id,sequence\n" + "".join(f"{i},s{i}\n" for i in ids))
+    rng = np.random.default_rng(0)
+
+    def cell(ordering, n, var, top1_a, top1_b):
+        for bb, t in zip(pe.PAIR, (top1_a, top1_b)):
+            d = tmp_path / bb / f"{ordering}_{n}_{var}"
+            d.mkdir(parents=True)
+            pd.DataFrame({"id": ids, "top1": t}).to_csv(d / "test_hits.csv", index=False)
+
+    base = rng.integers(0, 2, 200)
+    cell("nat", 50, "knn", np.maximum(base, rng.random(200) < 0.3), base)  # clearly better
+    cell("nat", 500, "knn", base, base)  # no gap left: shrink = gap(50)
+    cell("nat", 50, "probe_random", base, base)  # no gap
+    hyp = {"n_boot": 10_000, "alpha": 0.05, "primary": [
+        {"id": "H1/knn/nat", "quantity": "gap", "variant": "knn", "ordering": "nat", "n": 50, "claim": "a"},
+        {"id": "H2/knn/nat", "quantity": "shrink", "variant": "knn", "ordering": "nat", "n_small": 50,
+         "n_large": 500, "claim": "b"},
+        {"id": "H1/probe_random/nat", "quantity": "gap", "variant": "probe_random", "ordering": "nat",
+         "n": 50, "claim": "c"},
+        {"id": "H1/knn/bal", "quantity": "gap", "variant": "knn", "ordering": "bal", "n": 50, "claim": "d"}]}
+    prim = pe.primary_results(hyp, tmp_path, tmp_path, 0).set_index("id")
+    assert prim["verdict"].to_dict() == {"H1/knn/nat": "supported", "H2/knn/nat": "supported",
+                                         "H1/probe_random/nat": "not supported",
+                                         "H1/knn/bal": "not evaluable"}
+    assert prim.loc["H1/knn/bal", "p"] == 1.0 and np.isnan(prim.loc["H1/knn/bal", "ci_lo"])
+    np.testing.assert_allclose(prim["p_holm"], pe.holm(prim["p"]))  # m = 4, not-evaluable counts
+    assert prim.loc["H1/knn/nat", "p"] == pytest.approx(1 / 10_001)
+    assert prim.loc["H1/knn/nat", "estimate"] == prim.loc["H2/knn/nat", "estimate"]
+    assert prim.loc["H1/knn/nat", "ci_lo"] > 0 and prim.loc["H1/probe_random/nat", "ci_lo"] == 0
+
+
+
+def test_final_eval_writes_to_a_separate_directory_and_leaves_dev_untouched(final, capsys):
+    root, _, final_args, dev, _ = final
+    before = _tree(root / "res")
+    capsys.readouterr()
+    table = pe.run(pe.parse_args(final_args))
+    printed = capsys.readouterr().out
+    i_prim, i_expl = printed.index("=== PRIMARY"), printed.index("=== EXPLORATORY")
+    assert i_prim < i_expl and printed.index("max abs difference") > i_expl  # primary first
+    prim = pd.read_csv(root / "res_test" / "primary.csv")
+    assert len(prim) == 12 and set(prim["verdict"]) <= {"supported", "not supported"}
+    assert {"estimate", "ci_lo", "ci_hi", "p", "p_holm"} <= set(prim.columns)
+    assert (prim["p_holm"] >= prim["p"]).all() and (prim["p"] > 0).all()
+    assert prim["id"].iloc[0] in printed[i_prim:i_expl]
+    assert (table["analysis"] == "exploratory").all()
+    gp, sh = (pd.read_csv(root / "res_test" / f) for f in ("gaps.csv", "shrink.csv"))
+    assert (gp["analysis"] == "primary").sum() == 6 and (sh["analysis"] == "primary").sum() == 6
+    assert set(gp.loc[gp["analysis"] == "primary", "split"]) == {"test"}
+    assert _tree(root / "res") == before  # every dev file byte-identical
+    res = root / "res_test"
+    assert len(table) == len(dev) and "test_top1" in table and (res / "results.csv").exists()
+    for col in ("test_macro_top1", "test_tail_top1", "test_reliable_top1", "test_seen_creator_top1",
+                "test_unseen_creator_n", "test_top5_hi", "test_geoscore", "test_acc_25km"):
+        assert col in table
+    assert table.loc[table["method"] == "probe", "test_geoscore"].isna().all()  # country only
+    assert table.loc[table["method"] == "knn", "test_median_km"].notna().all()
+    assert "test" in set(pd.read_csv(res / "gaps.csv")["split"])
+    assert "test" in set(pd.read_csv(res / "shrink.csv")["split"])
+    # retrained with the frozen values: the pre-registered dev scores come back
+    for s in ("dev_seen", "dev_unseen"):
+        np.testing.assert_allclose(table[f"{s}_top1"], table[f"{s}_top1_prereg"], atol=1e-9)
+
+
+def test_final_eval_uses_the_frozen_hyperparameters_only(final, monkeypatch):
+    root, args, final_args, _, path = final
+    reg = json.loads(path.read_text())
+    probe = [c for c in reg["cells"] if c["method"] == "probe"]
+    probe[0]["lr"], probe[0]["epoch"] = 0.123, 2  # values no search would give: must be used
+    path.write_text(json.dumps(reg))
+    _git(path.parents[1], "commit", "-q", "-am", "edit")
+    prereg.provenance(path, root / "emb" / "prereg_provenance.json")  # a new embedding run
+    fits, ks = [], []
+    real_fit, real_scores = g.probe_logits, g.knn_country_scores
+
+    def fit(feats, labels, dev_feats, dev_labels, eval_feats, head_init, a, device):
+        fits.append((a.probe_lr, a.probe_epochs, a.probe_restore_best, a.probe_patience))
+        assert set(eval_feats) == {"dev_seen", "dev", "test"}
+        return real_fit(feats, labels, dev_feats, dev_labels, eval_feats, head_init, a, device)
+
+    monkeypatch.setattr(g, "probe_logits", fit)
+    monkeypatch.setattr(g, "knn_country_scores", lambda sims, idx, lab, n, k: ks.append(k)
+                        or real_scores(sims, idx, lab, n, k))
+    table = pe.run(pe.parse_args(final_args))
+    assert sorted(fits) == sorted((c["lr"], c["epoch"], False, 0) for c in probe)  # one fit each
+    knn = [c for c in reg["cells"] if c["method"] == "knn"]
+    assert sorted(ks) == sorted(c["k_country"] for c in knn for _ in range(3))  # 3 splits, no sweep
+    row = table[(table["backbone"] == probe[0]["backbone"]) & (table["ordering"] == probe[0]["ordering"])
+                & (table["n"] == probe[0]["n"]) & (table["variant"] == probe[0]["variant"])]
+    assert row["lr"].tolist() == [0.123] and row["epoch"].tolist() == [2]
+
+
+def test_final_eval_refuses_without_a_valid_preregistration(final):
+    root, args, final_args, _, path = final
+    with pytest.raises(SystemExit, match="needs --prereg"):
+        pe.run(pe.parse_args([*args, "--eval-test", "--test-emb-root", str(root / "emb")]))
+    with pytest.raises(SystemExit, match="cannot be used"):
+        pe.run(pe.parse_args([*final_args, "--seed-from", str(root / "res")]))
+    prov = root / "emb" / "prereg_provenance.json"
+    rec = json.loads(prov.read_text())
+    prov.write_text(json.dumps({**rec, "embedding_started": rec["prereg_commit_time"] - 1}))
+    with pytest.raises(SystemExit, match="does not predate"):
+        pe.run(pe.parse_args(final_args))
+    prov.unlink()
+    with pytest.raises(SystemExit, match="cannot be dated"):
+        pe.run(pe.parse_args(final_args))
+    prov.write_text(json.dumps(rec))
+    path.write_text(path.read_text().replace('"lr": ', '"lr": 1e-9 + '))  # edited, not committed
+    with pytest.raises(SystemExit, match="uncommitted"):
+        pe.run(pe.parse_args(final_args))
+    _git(path.parents[1], "commit", "-q", "-am", "edit after the embeddings")
+    with pytest.raises(SystemExit, match="differs"):
+        pe.run(pe.parse_args(final_args))
+    with pytest.raises(SystemExit, match="missing"):
+        prereg.git_state(root / "repo" / "configs" / "other.json")
+    other = root / "repo" / "configs" / "other.json"
+    other.write_text("{}")
+    with pytest.raises(SystemExit, match="not committed"):
+        prereg.git_state(other)
+    assert not (root / "res_test").exists()  # nothing scored on test
+
+
+def test_prereg_refuses_outdated_dev_rows(final):
+    root, args, *_ = final
+    results = root / "res" / "results.csv"
+    t = pd.read_csv(results)
+    t.loc[t["method"] == "probe", "cache_version"] = 1
+    t.to_csv(results, index=False)
+    with pytest.raises(SystemExit, match="cache version"):
+        prereg.write(root / "res", root / "p.json", pe.parse_args(args))
 
 
 def test_probe_lr_and_epoch_are_chosen_on_dev_seen_only(setup, monkeypatch):

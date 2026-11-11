@@ -394,6 +394,34 @@ separate `<out>_test` directory. On Kaggle, attach the full run's output as inpu
 !cd /kaggle/working/geoguessr-ai && bash scripts/kaggle_phase1_eval.sh
 ```
 
+**Pre-registration and the one-shot test evaluation.** Before the official test split is
+embedded, `python -m geoguessr_ai.prereg write --dev-out <dev phase1_eval dir>` writes
+`configs/phase1_final.json` and it is committed. It fixes the cells reported on test, their
+hyperparameters (the dev_seen-selected k, or learning rate and epoch, used as they are: no
+re-tuning on test), the head settings and the hypotheses. Primary: (H1) the paired StreetCLIP
+- L/14-336 test top-1 gap at N=50K is > 0, and (H2) the gap shrinks from 50K to 500K, each per
+variant x ordering: 12 hypotheses. Each gets a one-sided p-value from 10,000 paired
+cluster-bootstrap resamples on test (sequence clusters; the same resample applies to both
+backbones and both N): p = (1 + number of resampled statistics <= 0) / (10,000 + 1). The 12
+p-values are Holm-Bonferroni adjusted (family-wise alpha 0.05; a hypothesis whose cells were
+not run counts with p = 1), and a hypothesis is supported when its adjusted p < 0.05. The
+uncorrected 95% percentile interval is reported with each. Everything else is exploratory. Then
+`bash scripts/kaggle_phase1.sh test` embeds the 5 test zips into `emb_test/`; it refuses to
+start unless the pre-registration is committed and unmodified, and records its hash, commit
+and the start time. Finally `phase1_eval --eval-test --prereg configs/phase1_final.json
+--test-emb-root <emb_test>` retrains each declared cell once with its frozen hyperparameters,
+scores test into `<out>_test`, prints the primary results first (`primary.csv`) and labels
+every other output exploratory.
+
+What this does and does not guarantee: it is a self-discipline mechanism, not proof. The
+checks stop accidental test-driven choices (re-tuning on test, editing the plan after seeing
+results, scoring before committing), and the git history shows the order of events. But git
+timestamps can be set by whoever makes the commit, history can be rewritten, the provenance
+file is a plain JSON written by our own script, and nothing is signed or timestamped by a
+third party. A reader has to trust that the steps were followed; anyone who wants to cheat
+can. Pushing the commit to GitHub before the test run gives a weaker but external record
+(GitHub's push time), nothing more.
+
 ```
 # audit only (countries, overlap, groups), then the manifests
 python -m geoguessr_ai.v2_data --out /kaggle/working/v2 --audit-only

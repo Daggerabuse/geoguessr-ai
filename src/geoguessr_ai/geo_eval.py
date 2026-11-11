@@ -66,15 +66,24 @@ def per_image_geo(km: np.ndarray) -> dict[str, np.ndarray]:
 def cluster_bootstrap(values: np.ndarray, clusters, n_boot: int = 1000,
                       seed: int = 42) -> tuple[float, float]:
     """95% percentile interval of the mean, resampling whole clusters with replacement."""
+    lo, hi = np.percentile(bootstrap_means(values, clusters, n_boot, seed), [2.5, 97.5])
+    return float(lo), float(hi)
+
+
+def bootstrap_means(values: np.ndarray, clusters, n_boot: int = 1000, seed: int = 42,
+                    chunk: int = 200) -> np.ndarray:
+    """The n_boot resampled means of cluster_bootstrap (whole clusters with replacement), built
+    `chunk` resamples at a time (memory: chunk x clusters) from the same random stream."""
     codes, _ = pd.factorize(pd.Series(clusters))
     sums = np.bincount(codes, weights=values)
     counts = np.bincount(codes).astype(float)
     rng = np.random.default_rng(seed)
-    w = np.stack([np.bincount(rng.integers(0, len(sums), len(sums)), minlength=len(sums))
-                  for _ in range(n_boot)])
-    means = (w @ sums) / (w @ counts)
-    lo, hi = np.percentile(means, [2.5, 97.5])
-    return float(lo), float(hi)
+    out = []
+    for start in range(0, n_boot, chunk):
+        w = np.stack([np.bincount(rng.integers(0, len(sums), len(sums)), minlength=len(sums))
+                      for _ in range(min(chunk, n_boot - start))])
+        out.append((w @ sums) / (w @ counts))
+    return np.concatenate(out)
 
 
 def summarize(per_image: dict[str, np.ndarray], km: np.ndarray | None, clusters,
@@ -248,9 +257,9 @@ def clusters_of(name: str, df: pd.DataFrame) -> np.ndarray:
     return df["creator_id" if name == "dev" else "sequence"].to_numpy()
 
 
-def load_data(data: Path, emb: Path, eval_test: bool) -> dict:
+def load_data(data: Path, emb: Path, eval_test: bool, test_emb: Path | None = None) -> dict:
     """classes, counts, dfs and embeddings of train + the scored splits (dev_seen first: the
-    selection split). The official test is read only with eval_test."""
+    selection split). The official test is read only with eval_test, from test_emb if given."""
     from geoguessr_ai.embed import load_embeddings
 
     classes = json.loads((data / "classes.json").read_text())
@@ -261,7 +270,8 @@ def load_data(data: Path, emb: Path, eval_test: bool) -> dict:
     for name in splits:
         df = pd.read_csv(data / f"{name}.csv", dtype={"id": str, "sequence": str, "creator_id": str},
                          keep_default_na=False)
-        e, found = load_embeddings(emb, df["id"], "test" if name == "test" else "train")
+        e, found = (load_embeddings(test_emb or emb, df["id"], "test") if name == "test"
+                    else load_embeddings(emb, df["id"], "train"))
         if not found.all():
             print(f"WARNING: {name}: {(~found).sum()} of {len(df)} ids not embedded, dropped")
         dfs[name], embs[name] = df[found].reset_index(drop=True), e[found]
@@ -273,9 +283,39 @@ def load_data(data: Path, emb: Path, eval_test: bool) -> dict:
     return {"classes": classes, "counts": counts, "dfs": dfs, "embs": embs, "evals": evals}
 
 
-def run_cell(ctx: dict, strategy: str, n: int, head: str, out: Path, args, head_init=None) -> dict:
-    """One training subset (strategy, n) and head: choose hyperparameters on dev_seen, score
-    every split of ctx["evals"]; files under out. Returns the metrics dict."""
+def run_frozen(ctx, out, args, head, head_init, frozen, res, sub, db, lab, groups) -> dict:
+    """run_cell with given hyperparameters (kNN: k_country, k_coords; probe: lr, epoch): one
+    fit, every split of ctx["evals"] scored, nothing chosen on any of them."""
+    classes, dfs, embs, evals = ctx["classes"], ctx["dfs"], ctx["embs"], ctx["evals"]
+    res["frozen"] = dict(frozen)
+    if head == "knn":
+        k_c, k_g = int(frozen["k_country"]), int(frozen["k_coords"])
+        lat, lon = sub["latitude"].to_numpy(), sub["longitude"].to_numpy()
+        res.update({"k_country": k_c, "k_coords": k_g})
+        for s in evals:
+            nb = knn(embs[s], db, max(k_c, k_g), device=args.device or None)
+            res[s] = score_split(out, s, dfs[s], knn_country_scores(*nb, lab, len(classes), k_c),
+                                 classes, knn_coordinates(*nb, lat, lon, k_g), groups[s], args,
+                                 clusters_of(s, dfs[s]))
+        return res
+    # exactly `epoch` epochs at `lr`, the last head kept (dev_seen only logged in the history)
+    a = argparse.Namespace(**{**vars(args), "probe_lr": float(frozen["lr"]),
+                              "probe_epochs": int(frozen["epoch"]), "probe_patience": 0,
+                              "probe_restore_best": False})
+    logits, history = probe_logits(db, lab, embs["dev_seen"], dfs["dev_seen"]["label"].to_numpy(),
+                                   {s: embs[s] for s in evals}, head_init, a, args.device or "cpu")
+    res.update({"best_lr": a.probe_lr, "best_epoch": a.probe_epochs, "history": history})
+    for s in evals:
+        res[s] = score_split(out, s, dfs[s], logits[s], classes, None, groups[s], args,
+                             clusters_of(s, dfs[s]))
+    return res
+
+
+def run_cell(ctx: dict, strategy: str, n: int, head: str, out: Path, args, head_init=None,
+             frozen: dict | None = None) -> dict:
+    """One training subset (strategy, n) and head: choose hyperparameters on dev_seen (or use
+    `frozen` ones, see run_frozen), score every split of ctx["evals"]; files under out. Returns
+    the metrics dict."""
     classes, dfs, embs, evals = ctx["classes"], ctx["dfs"], ctx["embs"], ctx["evals"]
     train, sel = dfs["train"], dfs["dev_seen"]
     sub_mask = (train[f"{strategy}_rank"] < n).to_numpy()  # nested subset, see v2_data
@@ -288,6 +328,8 @@ def run_cell(ctx: dict, strategy: str, n: int, head: str, out: Path, args, head_
         groups[s]["class_not_in_subset"] = ~groups[s]["class_in_subset"]
     lat, lon = sub["latitude"].to_numpy(), sub["longitude"].to_numpy()
     res: dict = {"n_train": int(sub_mask.sum())}
+    if frozen is not None:  # pre-registered hyperparameters: no selection at all
+        return run_frozen(ctx, out, args, head, head_init, frozen, res, sub, db, lab, groups)
     if head == "knn":
         nbrs = {s: knn(embs[s], db, max(args.k), device=args.device or None) for s in evals}
         sweep = {}

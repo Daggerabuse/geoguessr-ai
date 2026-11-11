@@ -17,8 +17,11 @@ def test_modes_pilot_and_full():
     assert full["SHARDS"] == "'" + " ".join(map(str, range(98))) + "'"
     assert full["DEADLINE_MIN"] == "660" and full["OUT_NAME"] == "full"
     assert full["REPO"] == "Daggerabuse/osv5m-ft-archive"
+    assert pilot["SOURCE"] == full["SOURCE"] == "train"
+    test = _shell(ph.config("test"))
+    assert test["SHARDS"] == "'0 1 2 3 4'" and test["SOURCE"] == "test" and test["REPO"] == "''"
     with pytest.raises(SystemExit, match="unknown mode"):
-        ph.config("test")
+        ph.config("dev")
 
 
 def test_deadline_override_from_the_environment(monkeypatch):
@@ -35,6 +38,8 @@ def test_deadline_override_from_the_environment(monkeypatch):
     ("full", "daggerabuse/osv5m-ft-archive", False),
     ("full", "Other/osv5m-ft-archive", False),
     ("test", "Daggerabuse/osv5m-ft-archive", False),
+    ("test", "", True),
+    ("other", "", False),
 ])
 def test_repo_guard(mode, repo, ok):
     if ok:

@@ -31,6 +31,19 @@ Outputs in <out>:
   scaling.png   top-1 vs N (log x), 95% bands, one panel per variant x ordering
   gap.png       the paired difference vs N with its band, one panel per variant x ordering
 (variant: knn, probe_random, probe_zeroshot)
+Columns per split also: seen_creator / unseen_creator top-1 (creator in the cell's training
+subset or not; on test the unseen subset is small: about 2% of test images) and, for kNN only,
+geolocation metrics of its coordinate prediction (the k_coords neighbours' mean position):
+median/mean km, GeoScore (OSV-5M's 5000 exp(-km/1492.7)) and accuracy within 1/25/200/750/2500
+km. The probe predicts only a country; a country centroid is no location estimate, so the probe
+has no geolocation metrics. OSV-5M's region/area/city accuracies need reverse geocoding: skipped.
+
+--eval-test (the one-shot final evaluation, see prereg.py): runs only the pre-registered cells,
+with their frozen hyperparameters (geo_eval.run_frozen: one fit, nothing selected on any split),
+scores dev_seen, dev_unseen (to check the retrained cells reproduce their pre-registered dev
+scores) and test, into <out>_test; refuses without a committed pre-registration that predates
+the test embeddings (--test-emb-root/prereg_provenance.json). Head settings come from the
+pre-registration.
 Intervals: geo_eval.cluster_bootstrap (sequence clusters; creator clusters for dev_unseen).
 
 Usage (Kaggle; inputs from the full run, see scripts/kaggle_phase1_eval.sh):
@@ -48,6 +61,7 @@ import numpy as np
 import pandas as pd
 
 from geoguessr_ai import geo_eval as g
+from geoguessr_ai import prereg
 from geoguessr_ai.zipq import write_text
 
 BACKBONES = ("streetclip", "clip_l14_336", "clip_b16")
@@ -119,6 +133,106 @@ def edge_summary(table: pd.DataFrame, args) -> str:
             f"knn {len(k)} cells: k_min {has(k, 'k_min')}, k_max {has(k, 'k_max')}")
 
 
+def final_setup(args: argparse.Namespace) -> dict:
+    """--eval-test: check the pre-registration (prereg.py), apply its head settings and return
+    (its cells, (backbone, ordering, n, method, probe_init or '') -> frozen hyperparameters;
+    its hypotheses)."""
+    if args.seed_from:
+        raise SystemExit("--seed-from copies dev cells; it cannot be used with --eval-test")
+    if not (args.prereg and args.test_emb_root):
+        raise SystemExit("--eval-test needs --prereg and --test-emb-root: test is scored only "
+                         "for pre-registered cells, with their frozen hyperparameters")
+    reg = prereg.check(Path(args.prereg), Path(args.test_emb_root) / "prereg_provenance.json")
+    for k, v in reg["settings"].items():
+        setattr(args, k, v)
+    return ({(c["backbone"], c["ordering"], int(c["n"]), c["method"], c["probe_init"] or ""): c
+             for c in reg["cells"]}, reg.get("hypotheses", {}))
+
+
+def _keys(t: pd.DataFrame, quantity: str) -> list[tuple]:
+    """Hypothesis keys of the test rows of gaps (quantity 'gap') or shrink ('shrink')."""
+    cols = ["n"] if quantity == "gap" else ["n_small", "n_large"]
+    return [(quantity, r["variant"], r["ordering"], *(int(r[c]) for c in cols))
+            if r["split"] == "test" else None for r in t.to_dict("records")]
+
+
+def _hyp_key(h: dict) -> tuple:
+    ns = (h["n"],) if h["quantity"] == "gap" else (h["n_small"], h["n_large"])
+    return (h["quantity"], h["variant"], h["ordering"], *map(int, ns))
+
+
+def one_sided_p(means: np.ndarray) -> float:
+    """Bootstrap p-value for 'statistic > 0': the fraction of resampled statistics <= 0,
+    with the +1 correction, (1 + #{b: stat_b <= 0}) / (B + 1); never 0."""
+    means = np.asarray(means)
+    return float((1 + (means <= 0).sum()) / (len(means) + 1))
+
+
+def holm(p) -> np.ndarray:
+    """Holm-Bonferroni adjusted p-values: sort ascending, the i-th smallest (i = 0..m-1) gets
+    (m - i) * p, made non-decreasing in that order, capped at 1; original order returned."""
+    p = np.asarray(p, dtype=float)
+    adj, running = np.empty(len(p)), 0.0
+    for i, j in enumerate(np.argsort(p, kind="stable")):
+        running = max(running, min(1.0, (len(p) - i) * p[j]))
+        adj[j] = running
+    return adj
+
+
+def cell_diff(out: Path, ordering: str, n: int, var: str, split: str) -> pd.Series:
+    """Paired PAIR[0] - PAIR[1] top-1 per image of one cell (FileNotFoundError if not run)."""
+    a, b = (pd.read_csv(out / bb / f"{ordering}_{n}_{var}" / f"{split}_hits.csv",
+                        dtype={"id": str}) for bb in PAIR)
+    return hit_diff(a, b)
+
+
+def primary_results(hypotheses: dict, out: Path, data: Path, seed: int) -> pd.DataFrame:
+    """One row per pre-registered primary hypothesis, on test, with hypotheses['n_boot']
+    paired cluster resamples (the same resamples for every hypothesis): estimate, uncorrected
+    95% percentile CI, one-sided p (one_sided_p), Holm-adjusted p over all of them and the
+    verdict (supported = adjusted p < alpha). A hypothesis whose cells were not run is 'not
+    evaluable' and enters the Holm family with p = 1."""
+    n_boot, alpha = hypotheses["n_boot"], hypotheses["alpha"]
+    d = pd.read_csv(data / "test.csv", dtype=str, keep_default_na=False)
+    clusters = pd.Series(g.clusters_of("test", d), index=d["id"])
+    rows = []
+    for h in hypotheses.get("primary", []):
+        row = {"id": h["id"], "claim": h["claim"], "estimate": np.nan, "ci_lo": np.nan,
+               "ci_hi": np.nan, "p": 1.0, "evaluable": False}
+        try:
+            if h["quantity"] == "gap":
+                x = cell_diff(out, h["ordering"], h["n"], h["variant"], "test")
+            else:
+                x = (cell_diff(out, h["ordering"], h["n_small"], h["variant"], "test")
+                     - cell_diff(out, h["ordering"], h["n_large"], h["variant"], "test")).dropna()
+        except FileNotFoundError:
+            rows.append(row)
+            continue
+        means = g.bootstrap_means(x.to_numpy(dtype=float), x.index.map(clusters).to_numpy(),
+                                  n_boot, seed)
+        lo, hi = np.percentile(means, [2.5, 97.5])
+        row.update({"estimate": float(x.mean()), "ci_lo": float(lo), "ci_hi": float(hi),
+                    "p": one_sided_p(means), "evaluable": True})
+        rows.append(row)
+    res = pd.DataFrame(rows)
+    if res.empty:
+        return res
+    res["p_holm"] = holm(res["p"])
+    res["verdict"] = np.where(~res["evaluable"], "not evaluable",
+                              np.where(res["p_holm"] < alpha, "supported", "not supported"))
+    return res.drop(columns="evaluable")
+
+
+def label_primary(gp: pd.DataFrame, sh: pd.DataFrame, hypotheses: dict):
+    """analysis column: 'primary' for the test rows a pre-registered primary hypothesis is
+    about, 'exploratory' for every other row."""
+    keys = {_hyp_key(h) for h in hypotheses.get("primary", [])}
+    for t, q in ((gp, "gap"), (sh, "shrink")):
+        if len(t):
+            t["analysis"] = ["primary" if k in keys else "exploratory" for k in _keys(t, q)]
+    return gp, sh
+
+
 def random_head(n_classes: int, dim: int, seed: int):
     import torch
 
@@ -144,6 +258,18 @@ def cell_row(res: dict, backbone: str, ordering: str, n: int, method: str, init,
         for grp in GROUPS:
             row[f"{p}_{grp}_top1"] = (r[grp]["country_top1"]["mean"] if r[grp].get("n")
                                       else np.nan)
+        for grp in ("seen_creator", "unseen_creator"):  # creator in the cell's training subset
+            row[f"{p}_{grp}_n"] = r[grp]["n"]
+            v = r[grp]["country_top1"] if r[grp]["n"] else {}
+            row[f"{p}_{grp}_top1"], row[f"{p}_{grp}_top1_lo"], row[f"{p}_{grp}_top1_hi"] = (
+                v.get("mean", np.nan), v.get("ci_lo", np.nan), v.get("ci_hi", np.nan))
+        a = r["all"]
+        if "median_km" in a:  # kNN only (see the module docstring)
+            row[f"{p}_median_km"], row[f"{p}_mean_km"] = a["median_km"], a["mean_km"]
+            for m in ("geoscore", *(f"acc_{t}km" for t in g.KM_THRESHOLDS)):
+                row[f"{p}_{m}"] = a[m]["mean"]
+            row[f"{p}_geoscore_lo"], row[f"{p}_geoscore_hi"] = (a["geoscore"]["ci_lo"],
+                                                                 a["geoscore"]["ci_hi"])
     return row
 
 
@@ -185,11 +311,10 @@ def gaps(out: Path, data: Path, rows: pd.DataFrame, evals, n_boot: int,
     for s in evals:
         d = pd.read_csv(data / f"{s}.csv", dtype=str, keep_default_na=False)
         clusters[s] = pd.Series(g.clusters_of(s, d), index=d["id"])
-    have = set(rows["backbone"])
     out_rows, shrink_rows, diffs = [], [], {}
-    if not set(PAIR) <= have:
-        return pd.DataFrame(out_rows), pd.DataFrame(shrink_rows)
-    for (ordering, n, var), _ in rows.groupby(["ordering", "n", "variant"]):
+    for (ordering, n, var), grp in rows.groupby(["ordering", "n", "variant"]):
+        if not set(PAIR) <= set(grp["backbone"]):  # a pre-registered subset may lack a pair
+            continue
         for s in evals:
             a, b = (pd.read_csv(out / bb / f"{ordering}_{n}_{var}" / f"{s}_hits.csv",
                                 dtype={"id": str}) for bb in PAIR)
@@ -197,7 +322,8 @@ def gaps(out: Path, data: Path, rows: pd.DataFrame, evals, n_boot: int,
             out_rows.append({"ordering": ordering, "n": n, "variant": var,
                              "split": SPLIT_NAMES[s],
                              **paired_gap(a, b, clusters[s], n_boot, seed)})
-    for (ordering, var), grp in rows.groupby(["ordering", "variant"]):
+    paired = pd.DataFrame([k for k in diffs], columns=["ordering", "variant", "split", "n"])
+    for (ordering, var), grp in paired.groupby(["ordering", "variant"]):
         small, large = grp["n"].min(), grp["n"].max()
         if small == large:
             continue
@@ -278,19 +404,24 @@ def run(args: argparse.Namespace) -> pd.DataFrame:
         if not torch.cuda.is_available():
             print("no CUDA device: kNN with numpy, probe with torch on the CPU")
             args.device = ""
+    frozen, hypotheses = final_setup(args) if args.eval_test else ({}, {})
     if args.eval_test:
         out = out.with_name(out.name + "_test")  # never mixed with development results
     rows = []
-    for bb in args.backbones:
-        cells = [(o, n, m, i) for o in args.orderings for n in args.sizes for m in args.methods
-                 for i in ([None] if m == "knn" else args.probe_inits)]
+    for bb in (BACKBONES if frozen else args.backbones):
+        cells = ([(o, n, m, i or None) for (b, o, n, m, i) in frozen if b == bb] if frozen else
+                 [(o, n, m, i) for o in args.orderings for n in args.sizes for m in args.methods
+                  for i in ([None] if m == "knn" else args.probe_inits)])
+        if not cells:
+            continue
         if args.seed_from:
             print(f"{bb}: {seed_cells(Path(args.seed_from), out, bb, cells)} cells copied "
                   f"from {args.seed_from}")
         todo = [c for c in cells if not cell_done(cell_dir(out, bb, *c), c[2])]
         if todo:
             t = time.time()
-            ctx = g.load_data(data, emb_root / bb, args.eval_test)
+            ctx = g.load_data(data, emb_root / bb, args.eval_test,
+                              Path(args.test_emb_root) / bb if args.eval_test else None)
             print(f"{bb}: loaded in {time.time() - t:.0f} s; {len(todo)} of {len(cells)} cells to run")
             heads = {}
             if any(c[3] == "zeroshot" for c in todo):
@@ -301,20 +432,37 @@ def run(args: argparse.Namespace) -> pd.DataFrame:
                                               args.seed)
             for c in todo:
                 d, t = cell_dir(out, bb, *c), time.time()
-                res = g.run_cell(ctx, c[0], c[1], c[2], d, args, heads.get(c[3]))
+                fz = frozen.get((bb, *c[:3], c[3] or ""))
+                res = g.run_cell(ctx, c[0], c[1], c[2], d, args, heads.get(c[3]),
+                                 *([fz] if fz else []))
                 res["seconds"] = round(time.time() - t, 1)
+                extra = ({"grid_edge": fz["grid_edge"], "dev_seen_top1_prereg": fz["dev_seen_top1"],
+                          "dev_unseen_top1_prereg": fz["dev_unseen_top1"]} if fz else {})
                 write_text(d / "geo_metrics.json", json.dumps(res, indent=2, default=float))
                 write_text(d / "row.json", json.dumps(  # written last: the cell is done
-                    {**cell_row(res, bb, *c, ctx["evals"]), "seconds": res["seconds"],
+                    {**cell_row(res, bb, *c, ctx["evals"]), **extra, "seconds": res["seconds"],
                      "cache_version": CACHE_VERSION[c[2]]}, default=float))
                 print(f"{bb} {c}: {res['seconds']:.0f} s")
             del ctx
         rows += [read_row(cell_dir(out, bb, *c)) for c in cells]
     table = pd.DataFrame(rows)
-    table["grid_edge"] = table.apply(grid_edge, axis=1, args=(args,))
+    if frozen:
+        table["analysis"] = "exploratory"  # no primary hypothesis is about a single cell
+    else:
+        table["grid_edge"] = table.apply(grid_edge, axis=1, args=(args,))
     table.to_csv(out / "results.csv", index=False)
     evals = ("dev_seen", "dev", "test") if args.eval_test else ("dev_seen", "dev")
     gp, sh = gaps(out, data, table, evals, args.n_boot, args.seed)
+    if frozen:  # primary results first, everything else labelled exploratory
+        prim = primary_results(hypotheses, out, data, args.seed)
+        prim.to_csv(out / "primary.csv", index=False)
+        print(f"=== PRIMARY (pre-registered): {hypotheses.get('criterion', '')} ===")
+        print(prim.to_string(index=False) if len(prim) else "(none declared)")
+        print("=== EXPLORATORY: everything below, and every output not in primary.csv ===")
+        gp, sh = label_primary(gp, sh, hypotheses)
+        for s in ("dev_seen", "dev_unseen"):  # the retrained cells reproduce their dev scores
+            diff = (table[f"{s}_top1"] - table[f"{s}_top1_prereg"]).abs().max()
+            print(f"{s} top-1 vs pre-registration: max abs difference {diff:.5f}")
     gp.to_csv(out / "gaps.csv", index=False)
     sh.to_csv(out / "shrink.csv", index=False)
     plot_scaling(table, out / "scaling.png", [SPLIT_NAMES[s] for s in evals])
@@ -339,6 +487,9 @@ def parse_args(argv=None) -> argparse.Namespace:
                     default=["random", "zeroshot"])
     ap.add_argument("--seed-from", help="earlier output dir: copy its finished, current-version "
                     "cells before running")
+    ap.add_argument("--prereg", help="--eval-test: the committed pre-registration (prereg.py)")
+    ap.add_argument("--test-emb-root", help="--eval-test: kaggle_phase1.sh test output (emb_test: "
+                    "one cache per backbone + prereg_provenance.json)")
     g.add_head_args(ap)
     ap.set_defaults(probe_lrs=PROBE_LRS, probe_epochs=PROBE_EPOCHS, probe_patience=PROBE_PATIENCE)
     return ap.parse_args(argv)
