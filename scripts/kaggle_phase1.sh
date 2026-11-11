@@ -15,6 +15,7 @@
 # Stop the Kaggle session right after the last cell: the quota runs until it is stopped.
 set -euo pipefail
 set +x
+. "$(dirname "${BASH_SOURCE[0]}")/bg_helpers.sh"
 
 eval "$(python -m geoguessr_ai.phase1 config "${1:?usage: kaggle_phase1.sh pilot|full}")"
 W=/kaggle/working
@@ -48,14 +49,14 @@ echo "session_start_utc $(date -u +%FT%TZ)" > "$P/quota_times.txt"
   while :; do
     t=$(du -sb /kaggle/temp 2>/dev/null | cut -f1); w=$(du -sb "$W" 2>/dev/null | cut -f1)
     echo "$(date +%s) ${t:-0} ${w:-0}"
-    sleep 10
-  done ) > "$P/disk_bytes.log" &
+    nap 10
+  done ) > "$P/disk_bytes.log" 2>&1 &
 DU=$!
 BG="$DU"
 summary() {
   local rc=$?
   set +e
-  kill $BG 2>/dev/null
+  reap $BG
   step "summary ($MODE, exit $rc)"
   for m in clip_l14_336 streetclip clip_b16; do tail -n 1 "$EMB/$m/throughput.jsonl" 2>/dev/null; done
   cat "$P/zipq_stats.json" 2>/dev/null
@@ -108,8 +109,8 @@ timeout "$(left)" python -m geoguessr_ai.ft_archive consume --ids $IDS --nat-max
   --staging "$STAGING" --out "$ARCHIVE" --repo "$REPO" --mode "$MODE" --log "$P/upload.log" \
   > "$P/ft_archive.log" 2>&1 & P4=$!
 # deadline: a clean stop at the next zip boundary (not a failure)
-( sleep $((DEADLINE - $(date +%s) > 0 ? DEADLINE - $(date +%s) : 0)); echo "deadline" > "$Z/markers/STOP"
-  echo "DEADLINE: STOP written; consumers finish their current zip" ) & WATCH=$!
+( nap $((DEADLINE - $(date +%s) > 0 ? DEADLINE - $(date +%s) : 0)); echo "deadline" > "$Z/markers/STOP"
+  echo "DEADLINE: STOP written; consumers finish their current zip" ) >> "$P/progress.log" 2>&1 & WATCH=$!
 python -u -m geoguessr_ai.phase1 progress --zip-dir "$Z" --index-dir "$IDX" --shards $SHARDS \
   --consumers $CONSUMERS --ids $IDS --disk /kaggle/temp "$W" > >(tee -a "$P/progress.log") 2>&1 & PROG=$!
 BG="$DU $WATCH $PROG"
@@ -124,7 +125,7 @@ while [ ${#NAME[@]} -gt 0 ]; do
     [ -e "$Z/markers/ABORT" ] || echo "$MODE: $name failed" > "$Z/markers/ABORT"
   fi
 done
-kill $WATCH $PROG 2>/dev/null || true
+reap $WATCH $PROG
 tail -n 3 "$P"/*.log
 [ $status -eq 0 ] || fail "a pipeline process failed"
 python -m geoguessr_ai.phase1 status --zip-dir "$Z" --shards $SHARDS --consumers $CONSUMERS \
