@@ -10,7 +10,13 @@ geo_eval.run_cell. The official test is
 read only with --eval-test (into a separate results directory).
 
 Cells are cached: <out>/<backbone>/<ordering>_<N>_<variant>/row.json is written last, and a
-rerun skips every cell that has it (a backbone whose cells are all done is not even loaded).
+rerun skips every cell whose row.json carries the method's current CACHE_VERSION (a backbone
+whose cells are all done is not even loaded). --seed-from copies such finished cells from an
+earlier output first (e.g. the previous Kaggle run attached as input).
+
+Probe search: --probe-lrs x epochs 0..--probe-epochs, a run stopped after --probe-patience
+epochs without a dev_seen gain (this script's defaults differ from geo_eval's); results.csv's
+grid_edge column flags a choice at the edge of the search grid.
 
 Outputs in <out>:
   results.csv   one row per cell: chosen k / lr / epoch; per split top-1/top-5 with intervals,
@@ -20,6 +26,8 @@ Outputs in <out>:
                 absent from the training subset, head/middle/tail and reliable top-1
   gaps.csv      paired StreetCLIP - L/14-336 top-1 difference per ordering x N x variant x split
                 (same images; cluster bootstrap: sequences, creators for dev_unseen)
+  shrink.csv    gap(smallest N) - gap(largest N) per ordering x variant x split, paired the same
+                way (same images, same cluster resamples): does the gap shrink with N?
   scaling.png   top-1 vs N (log x), 95% bands, one panel per variant x ordering
   gap.png       the paired difference vs N with its band, one panel per variant x ordering
 (variant: knn, probe_random, probe_zeroshot)
@@ -31,6 +39,7 @@ Usage (Kaggle; inputs from the full run, see scripts/kaggle_phase1_eval.sh):
 
 import argparse
 import json
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -45,6 +54,10 @@ BACKBONES = ("streetclip", "clip_l14_336", "clip_b16")
 PAIR = ("streetclip", "clip_l14_336")  # geographic pretraining vs its matched base
 SPLIT_NAMES = {"dev_seen": "dev_seen", "dev": "dev_unseen", "test": "test"}
 GROUPS = ("reliable", "head", "middle", "tail")
+# bump a method's version when its search or scoring changes: only that method's cells rerun
+# (rows written before versioning count as 1)
+CACHE_VERSION = {"knn": 1, "probe": 3}
+PROBE_LRS, PROBE_EPOCHS, PROBE_PATIENCE = [1e-3, 3e-3, 1e-2, 3e-2], 60, 8
 
 
 def variant(method: str, init: str | None) -> str:
@@ -56,6 +69,56 @@ def cell_dir(out: Path, backbone: str, ordering: str, n: int, method: str,
     return out / backbone / f"{ordering}_{n}_{variant(method, init)}"
 
 
+def read_row(d: Path) -> dict | None:
+    f = d / "row.json"
+    return {"cache_version": 1, **json.loads(f.read_text())} if f.exists() else None
+
+
+def cell_done(d: Path, method: str) -> bool:
+    row = read_row(d)
+    return row is not None and row["cache_version"] == CACHE_VERSION[method]
+
+
+def seed_cells(src: Path, out: Path, backbone: str, cells) -> int:
+    """Copy cells finished at the current version from src (row.json last, as when written)."""
+    copied = 0
+    for c in cells:
+        s, d = cell_dir(src, backbone, *c), cell_dir(out, backbone, *c)
+        if cell_done(d, c[2]) or not cell_done(s, c[2]):
+            continue
+        # copyfile: no mode bits (the Kaggle input is read-only)
+        shutil.copytree(s, d, ignore=shutil.ignore_patterns("row.json"), dirs_exist_ok=True,
+                        copy_function=shutil.copyfile)
+        shutil.copyfile(s / "row.json", d / "row.json")
+        copied += 1
+    return copied
+
+
+def grid_edge(row, args) -> str:
+    """';'-joined flags of a choice at the edge of its search grid ('' = interior)."""
+    if row["method"] == "knn":
+        ks = sorted(args.k)
+        return {ks[0]: "k_min", ks[-1]: "k_max"}.get(row["k"], "") if len(ks) > 1 else ""
+    lrs, flags = sorted(args.probe_lrs), []
+    if len(lrs) > 1 and row["lr"] <= lrs[0]:
+        flags.append("lr_low")
+    if len(lrs) > 1 and row["lr"] >= lrs[-1]:
+        flags.append("lr_high")
+    # best epoch in the final 10% of a run that used them all: more epochs might still help
+    if row["epoch"] > 0.9 * args.probe_epochs and row.get("stopped_early") != True:  # noqa: E712 (NaN, numpy bools)
+        flags.append("last_epoch")
+    return ";".join(flags)
+
+
+def edge_summary(table: pd.DataFrame, args) -> str:
+    p, k = table[table["method"] == "probe"], table[table["method"] == "knn"]
+    has = lambda t, f: int(t["grid_edge"].str.contains(f).sum())
+    stopped = int((p["stopped_early"] == True).sum())  # noqa: E712 (NaN in old rows)
+    return (f"grid edges: probe {len(p)} cells: lr_low {has(p, 'lr_low')}, lr_high "
+            f"{has(p, 'lr_high')}, last_epoch {has(p, 'last_epoch')} (stopped early: {stopped}); "
+            f"knn {len(k)} cells: k_min {has(k, 'k_min')}, k_max {has(k, 'k_max')}")
+
+
 def random_head(n_classes: int, dim: int, seed: int):
     import torch
 
@@ -65,7 +128,8 @@ def random_head(n_classes: int, dim: int, seed: int):
 def cell_row(res: dict, backbone: str, ordering: str, n: int, method: str, init, evals) -> dict:
     row = {"backbone": backbone, "ordering": ordering, "n": n, "method": method,
            "probe_init": init or "", "variant": variant(method, init), "n_train": res["n_train"],
-           "k": res.get("k_country"), "lr": res.get("best_lr"), "epoch": res.get("best_epoch")}
+           "k": res.get("k_country"), "lr": res.get("best_lr"), "epoch": res.get("best_epoch"),
+           "stopped_early": res.get("stopped_early")}
     for s in evals:
         p, r = SPLIT_NAMES[s], res[s]
         row[f"{p}_n"] = r["all"]["n"]
@@ -83,33 +147,66 @@ def cell_row(res: dict, backbone: str, ordering: str, n: int, method: str, init,
     return row
 
 
+def hit_diff(a: pd.DataFrame, b: pd.DataFrame) -> pd.Series:
+    """top1_a - top1_b per image id, over the images both scored."""
+    return (a.set_index("id")["top1"] - b.set_index("id")["top1"]).dropna()
+
+
+def mean_ci(d: pd.Series, clusters: pd.Series, n_boot: int, seed: int) -> tuple[float, float]:
+    """Cluster-bootstrap interval of d's mean; the same seed and image set give the same
+    resamples for every quantity, so differences between them stay paired."""
+    return g.cluster_bootstrap(d.to_numpy(dtype=float), d.index.map(clusters).to_numpy(),
+                               n_boot, seed)
+
+
 def paired_gap(a: pd.DataFrame, b: pd.DataFrame, clusters: pd.Series, n_boot: int,
                seed: int) -> dict:
     """mean(top1_a - top1_b) over the images both scored, with a paired cluster bootstrap
     (one resample of clusters applies to both backbones). clusters: id -> cluster."""
-    m = a.merge(b, on="id", suffixes=("_a", "_b"))
-    d = (m["top1_a"] - m["top1_b"]).to_numpy(dtype=float)
-    lo, hi = g.cluster_bootstrap(d, m["id"].map(clusters).to_numpy(), n_boot, seed)
-    return {"gap": float(d.mean()), "gap_lo": lo, "gap_hi": hi, "n_images": len(m)}
+    d = hit_diff(a, b)
+    lo, hi = mean_ci(d, clusters, n_boot, seed)
+    return {"gap": float(d.mean()), "gap_lo": lo, "gap_hi": hi, "n_images": len(d)}
 
 
-def gaps(out: Path, data: Path, rows: pd.DataFrame, evals, n_boot: int, seed: int) -> pd.DataFrame:
+def shrink(d_small: pd.Series, d_large: pd.Series, clusters: pd.Series, n_boot: int,
+           seed: int) -> dict:
+    """gap(small N) - gap(large N) from per-image paired differences, over the images both
+    cells scored; positive = the gap shrinks as N grows."""
+    x = (d_small - d_large).dropna()
+    lo, hi = mean_ci(x, clusters, n_boot, seed)
+    return {"gap_small": float(d_small[x.index].mean()), "gap_large": float(d_large[x.index].mean()),
+            "shrink": float(x.mean()), "shrink_lo": lo, "shrink_hi": hi, "n_images": len(x)}
+
+
+def gaps(out: Path, data: Path, rows: pd.DataFrame, evals, n_boot: int,
+         seed: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """(gaps, shrink) tables, see the module docstring."""
     clusters = {}
     for s in evals:
         d = pd.read_csv(data / f"{s}.csv", dtype=str, keep_default_na=False)
         clusters[s] = pd.Series(g.clusters_of(s, d), index=d["id"])
     have = set(rows["backbone"])
-    out_rows = []
+    out_rows, shrink_rows, diffs = [], [], {}
     if not set(PAIR) <= have:
-        return pd.DataFrame(out_rows)
+        return pd.DataFrame(out_rows), pd.DataFrame(shrink_rows)
     for (ordering, n, var), _ in rows.groupby(["ordering", "n", "variant"]):
         for s in evals:
             a, b = (pd.read_csv(out / bb / f"{ordering}_{n}_{var}" / f"{s}_hits.csv",
                                 dtype={"id": str}) for bb in PAIR)
+            diffs[ordering, var, s, n] = hit_diff(a, b)
             out_rows.append({"ordering": ordering, "n": n, "variant": var,
                              "split": SPLIT_NAMES[s],
                              **paired_gap(a, b, clusters[s], n_boot, seed)})
-    return pd.DataFrame(out_rows)
+    for (ordering, var), grp in rows.groupby(["ordering", "variant"]):
+        small, large = grp["n"].min(), grp["n"].max()
+        if small == large:
+            continue
+        for s in evals:
+            shrink_rows.append({"ordering": ordering, "variant": var, "split": SPLIT_NAMES[s],
+                                "n_small": small, "n_large": large,
+                                **shrink(diffs[ordering, var, s, small],
+                                         diffs[ordering, var, s, large], clusters[s], n_boot, seed)})
+    return pd.DataFrame(out_rows), pd.DataFrame(shrink_rows)
 
 
 def plot_scaling(rows: pd.DataFrame, path: Path, splits) -> None:
@@ -187,7 +284,10 @@ def run(args: argparse.Namespace) -> pd.DataFrame:
     for bb in args.backbones:
         cells = [(o, n, m, i) for o in args.orderings for n in args.sizes for m in args.methods
                  for i in ([None] if m == "knn" else args.probe_inits)]
-        todo = [c for c in cells if not (cell_dir(out, bb, *c) / "row.json").exists()]
+        if args.seed_from:
+            print(f"{bb}: {seed_cells(Path(args.seed_from), out, bb, cells)} cells copied "
+                  f"from {args.seed_from}")
+        todo = [c for c in cells if not cell_done(cell_dir(out, bb, *c), c[2])]
         if todo:
             t = time.time()
             ctx = g.load_data(data, emb_root / bb, args.eval_test)
@@ -205,19 +305,24 @@ def run(args: argparse.Namespace) -> pd.DataFrame:
                 res["seconds"] = round(time.time() - t, 1)
                 write_text(d / "geo_metrics.json", json.dumps(res, indent=2, default=float))
                 write_text(d / "row.json", json.dumps(  # written last: the cell is done
-                    {**cell_row(res, bb, *c, ctx["evals"]), "seconds": res["seconds"]}, default=float))
+                    {**cell_row(res, bb, *c, ctx["evals"]), "seconds": res["seconds"],
+                     "cache_version": CACHE_VERSION[c[2]]}, default=float))
                 print(f"{bb} {c}: {res['seconds']:.0f} s")
             del ctx
-        rows += [json.loads((cell_dir(out, bb, *c) / "row.json").read_text()) for c in cells]
+        rows += [read_row(cell_dir(out, bb, *c)) for c in cells]
     table = pd.DataFrame(rows)
+    table["grid_edge"] = table.apply(grid_edge, axis=1, args=(args,))
     table.to_csv(out / "results.csv", index=False)
     evals = ("dev_seen", "dev", "test") if args.eval_test else ("dev_seen", "dev")
-    gp = gaps(out, data, table, evals, args.n_boot, args.seed)
+    gp, sh = gaps(out, data, table, evals, args.n_boot, args.seed)
     gp.to_csv(out / "gaps.csv", index=False)
+    sh.to_csv(out / "shrink.csv", index=False)
     plot_scaling(table, out / "scaling.png", [SPLIT_NAMES[s] for s in evals])
     if not gp.empty:
         plot_gap(gp, out / "gap.png")
         print(gp.to_string())
+        print(sh.to_string())
+    print(edge_summary(table, args))
     return table
 
 
@@ -232,7 +337,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--methods", nargs="+", choices=["knn", "probe"], default=["knn", "probe"])
     ap.add_argument("--probe-inits", nargs="+", choices=["random", "zeroshot"],
                     default=["random", "zeroshot"])
+    ap.add_argument("--seed-from", help="earlier output dir: copy its finished, current-version "
+                    "cells before running")
     g.add_head_args(ap)
+    ap.set_defaults(probe_lrs=PROBE_LRS, probe_epochs=PROBE_EPOCHS, probe_patience=PROBE_PATIENCE)
     return ap.parse_args(argv)
 
 

@@ -10,8 +10,8 @@ BASH = shutil.which("bash")
 pytestmark = pytest.mark.skipif(BASH is None, reason="needs bash")
 
 
-def run(root):
-    return subprocess.run([BASH, "-c", f". '{HELPER.as_posix()}'; find_input \"$1\"", "_", root.as_posix()],
+def run(root, *rel):
+    return subprocess.run([BASH, "-c", f". '{HELPER.as_posix()}'; find_input \"$@\"", "_", root.as_posix(), *rel],
                           capture_output=True, text=True, timeout=30, check=False)
 
 
@@ -39,3 +39,12 @@ def test_two_matches_fail_and_list(tmp_path):
 def test_no_match_fails(tmp_path):
     out = run(tmp_path)
     assert out.returncode != 0 and "found 0" in out.stderr
+
+
+def test_other_relative_path(tmp_path):
+    make(tmp_path, "data")
+    (tmp_path / "notebooks/u/old-eval/phase1_eval").mkdir(parents=True)
+    (tmp_path / "notebooks/u/old-eval/phase1_eval/results.csv").write_text("")
+    out = run(tmp_path, "phase1_eval/results.csv")
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == (tmp_path / "notebooks/u/old-eval").as_posix()

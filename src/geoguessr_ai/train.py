@@ -292,7 +292,8 @@ def top1(logits: np.ndarray, labels: np.ndarray) -> float:
 
 
 def train_probe(model, feats, labels, val_feats, val_labels, args, device, history):
-    """Train only the head; epoch 0 = zero-shot starting point. The best-val head is restored."""
+    """Train only the head; epoch 0 = zero-shot starting point. The best-val head is restored.
+    args.probe_patience (optional, 0 = off): stop after that many epochs without a new best."""
     import torch
     import torch.nn.functional as F
 
@@ -308,6 +309,7 @@ def train_probe(model, feats, labels, val_feats, val_labels, args, device, histo
     print(f"[probe] epoch 0 (initial) val_top1={best:.4f}")
     opt = torch.optim.AdamW([model.head], lr=args.probe_lr, weight_decay=0.0)
     gen = torch.Generator().manual_seed(args.seed)
+    patience, bad = getattr(args, "probe_patience", 0), 0
     for ep in range(1, args.probe_epochs + 1):
         perm = torch.randperm(len(feats), generator=gen).to(device)
         tot = 0.0
@@ -323,7 +325,12 @@ def train_probe(model, feats, labels, val_feats, val_labels, args, device, histo
         acc = val_acc()
         history.append({"phase": "probe", "epoch": ep, "train_loss": tot / len(perm), "val_top1": acc})
         if acc > best:
-            best, best_head = acc, model.head.detach().clone()
+            best, best_head, bad = acc, model.head.detach().clone(), 0
+        else:
+            bad += 1
+        if patience and bad >= patience:
+            print(f"[probe] early stop at epoch {ep}: no gain for {patience} epochs")
+            break
     model.head.data.copy_(best_head)
     print(f"[probe] best val_top1={best:.4f}")
 

@@ -312,11 +312,12 @@ def run_cell(ctx: dict, strategy: str, n: int, head: str, out: Path, args, head_
                                               {s: embs[s] for s in evals}, head_init, a,
                                               args.device or "cpu")
             top = max(history, key=lambda h: h["val_top1"])  # train_probe restores this epoch
-            res["lr_sweep_dev_seen"][lr] = {"dev_seen_top1": top["val_top1"],
-                                            "epoch": top["epoch"], "history": history}
+            stopped = history[-1]["epoch"] < args.probe_epochs  # early stopping (probe_patience)
+            res["lr_sweep_dev_seen"][lr] = {"dev_seen_top1": top["val_top1"], "epoch": top["epoch"],
+                                            "stopped_early": stopped, "history": history}
             if best is None or top["val_top1"] > best[0]:
-                best = (top["val_top1"], lr, top["epoch"], logits_lr)
-        _, res["best_lr"], res["best_epoch"], logits = best
+                best = (top["val_top1"], lr, top["epoch"], stopped, logits_lr)
+        _, res["best_lr"], res["best_epoch"], res["stopped_early"], logits = best
         for s in evals:
             res[s] = score_split(out, s, dfs[s], logits[s], classes, None, groups[s], args,
                                  clusters_of(s, dfs[s]))
@@ -375,6 +376,8 @@ def add_head_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--probe-epochs", type=int, default=30)
     ap.add_argument("--probe-lrs", type=float, nargs="+", default=[3e-4, 1e-3, 3e-3],
                     help="probe learning rates; one is chosen with the epoch on dev_seen")
+    ap.add_argument("--probe-patience", type=int, default=0,
+                    help="stop a probe run after this many epochs without a dev_seen gain (0 = off)")
     ap.add_argument("--label-smoothing", type=float, default=0.1)
     ap.add_argument("--logit-scale", type=float, default=100.0)
     ap.add_argument("--n-boot", type=int, default=1000)
