@@ -375,6 +375,25 @@ Full run: the same Cell 1, then
 Outputs: `/kaggle/working/full/` (logs, checks, progress, disk peaks, quota times) and the
 embeddings in `/kaggle/working/emb/`.
 
+**Phase 1 analysis.** `phase1_eval.py` asks whether geographic pretraining (StreetCLIP)
+improves sample efficiency over its matched base (CLIP L/14-336) and B/16, and whether the
+gap closes as N grows. Grid: backbone x ordering (nat, bal) x N (50K-500K) x method (kNN,
+linear probe) x probe init (random, or zero-shot from the backbone's text encoder, which
+separates image-representation quality from text-encoder quality); each cell uses
+`geo_eval.run_cell` (k, or the probe's learning rate and stopping epoch jointly, chosen on
+dev_seen only; scored on dev_seen and dev_unseen) and is cached, so a rerun skips finished
+cells. The primary macro top-1 averages over a fixed class set per split (every country in
+it, comparable across N), each with its actual accuracy: a zero-shot head can predict a
+country absent from the training subset; top-1 on those images is a separate column. Outputs:
+`results.csv` (one row per cell), `gaps.csv` (paired StreetCLIP - L/14-336 differences on the
+same images), `scaling.png` and `gap.png`. Intervals are cluster bootstraps over sequences,
+and over creators for dev_unseen. The official test is read only with `--eval-test`, into a
+separate `<out>_test` directory. On Kaggle, attach the full run's output as input and run:
+```
+!git clone -b v2-phase0 https://github.com/Daggerabuse/geoguessr-ai.git /kaggle/working/geoguessr-ai && cd /kaggle/working/geoguessr-ai && pip install -q -e .
+!cd /kaggle/working/geoguessr-ai && bash scripts/kaggle_phase1_eval.sh
+```
+
 ```
 # audit only (countries, overlap, groups), then the manifests
 python -m geoguessr_ai.v2_data --out /kaggle/working/v2 --audit-only

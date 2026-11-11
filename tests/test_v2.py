@@ -191,7 +191,7 @@ def test_score_split_counts_unseen_classes_as_errors_and_keeps_full_label_space(
                           index=["AA", "BB", "ZZ"])
     groups = g.row_groups(df, counts, np.array([True, False, False, False]))
     r = g.score_split(tmp_path, "dev", df, scores, classes, None, groups,
-                      argparse.Namespace(n_boot=50, seed=0))
+                      argparse.Namespace(n_boot=50, seed=0), df["sequence"])
     assert r["all"]["country_top1"]["mean"] == 0.5  # a, c right; b wrong; d counts as an error
     assert r["all"]["macro_top1"] == pytest.approx((0.5 + 1.0 + 0.0) / 3)
     assert r["class_in_train"]["country_top1"]["mean"] == pytest.approx(2 / 3)

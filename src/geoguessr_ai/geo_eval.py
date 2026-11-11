@@ -12,7 +12,7 @@ subset. Groups select rows only; predictions always range over the full class li
 Country metrics use the same files as baseline_clip/train (write_split_results).
 Distance metrics follow OSV-5M: haversine km, GeoScore = 5000 * exp(-km / 1492.7),
 accuracy within 1/25/200/750/2500 km. Intervals: cluster bootstrap over sequences
-(frames of one sequence are not independent). Test images whose creator also appears in
+(frames of one sequence are not independent); for dev (unseen creators) over creators. Test images whose creator also appears in
 the training subset are reported separately ("seen" / "unseen" creator).
 
 Usage (Kaggle):
@@ -200,7 +200,7 @@ def row_groups(df: pd.DataFrame, counts: pd.DataFrame, seen_creator) -> dict[str
 
 
 def score_split(out: Path, name: str, df: pd.DataFrame, scores: np.ndarray, classes,
-                coords, groups: dict[str, np.ndarray], args) -> dict:
+                coords, groups: dict[str, np.ndarray], args, clusters) -> dict:
     """Country files (images of countries with training data) + metrics per row group.
 
     Global country metrics ("all") include images of countries without training data: they
@@ -214,21 +214,27 @@ def score_split(out: Path, name: str, df: pd.DataFrame, scores: np.ndarray, clas
     (out / f"{name}_confusion.png").unlink(missing_ok=True)  # unreadable at ~200 classes; CSV kept
     hit1, hitk = evaluate(scores, lab)[:2]  # label -1 never matches a prediction
     per = {"country_top1": hit1.astype(float), "country_top5": hitk.astype(float)}
+    pd.DataFrame({"id": df["id"], "top1": hit1.astype(int), "top5": hitk.astype(int)}) \
+        .to_csv(out / f"{name}_hits.csv", index=False)
     km = None
     if coords is not None:
         km = haversine(df["latitude"].to_numpy(), df["longitude"].to_numpy(), *coords)
         per.update(per_image_geo(km))
         pd.DataFrame({"id": df["id"], "pred_lat": coords[0], "pred_lon": coords[1], "km": km}) \
             .to_csv(out / f"{name}_geo_predictions.csv", index=False)
-    seq, country = df["sequence"].to_numpy(), df["country"].to_numpy()
+    clusters, country = np.asarray(clusters), df["country"].to_numpy()
     res: dict = {"country_files": m}
     for g, mask in groups.items():
         r = summarize({k: v[mask] for k, v in per.items()}, None if km is None else km[mask],
-                      seq[mask], args.n_boot, args.seed)
+                      clusters[mask], args.n_boot, args.seed)
         if mask.any():
             r["macro_top1"] = float(pd.Series(hit1[mask]).groupby(country[mask]).mean().mean())
             r["n_countries"] = len(set(country[mask]))
         res[g] = r
+    if "class_in_subset" in groups:
+        # fixed class set (every country of the split), comparable across N; a country absent
+        # from the training subset keeps its actual accuracy (a zero-shot head can predict it)
+        res["macro_top1_fixed"] = float(pd.Series(hit1).groupby(country).mean().mean())
     return res
 
 
@@ -236,65 +242,97 @@ def pick(results: dict, metric: str) -> int:
     return max(results, key=lambda k: results[k][metric])
 
 
-def run(args: argparse.Namespace) -> list[dict]:
+def clusters_of(name: str, df: pd.DataFrame) -> np.ndarray:
+    """Bootstrap clusters: sequences; for dev (creators unseen in train) whole creators, since
+    a new photographer's images succeed or fail together."""
+    return df["creator_id" if name == "dev" else "sequence"].to_numpy()
+
+
+def load_data(data: Path, emb: Path, eval_test: bool) -> dict:
+    """classes, counts, dfs and embeddings of train + the scored splits (dev_seen first: the
+    selection split). The official test is read only with eval_test."""
     from geoguessr_ai.embed import load_embeddings
 
-    data = Path(args.data)
     classes = json.loads((data / "classes.json").read_text())
     # keep_default_na=False everywhere: "NA" is Namibia, not a missing value
     counts = pd.read_csv(data / "country_counts.csv", index_col=0, keep_default_na=False)
-    splits = ("train", "dev_seen", "dev", "test") if args.eval_test else ("train", "dev_seen", "dev")
+    splits = ("train", "dev_seen", "dev", "test") if eval_test else ("train", "dev_seen", "dev")
     dfs, embs = {}, {}
     for name in splits:
         df = pd.read_csv(data / f"{name}.csv", dtype={"id": str, "sequence": str, "creator_id": str},
                          keep_default_na=False)
-        e, found = load_embeddings(Path(args.emb), df["id"], "test" if name == "test" else "train")
+        e, found = load_embeddings(emb, df["id"], "test" if name == "test" else "train")
         if not found.all():
             print(f"WARNING: {name}: {(~found).sum()} of {len(df)} ids not embedded, dropped")
         dfs[name], embs[name] = df[found].reset_index(drop=True), e[found]
-    train, sel, evals = dfs["train"], dfs["dev_seen"], splits[1:]  # sel: hyperparameter choice
+    evals = splits[1:]
     for name in evals:  # the kNN database / probe data must never contain evaluated images
         for col in ("id", "sequence"):
-            if set(train[col]) & set(dfs[name][col]):
+            if set(dfs["train"][col]) & set(dfs[name][col]):
                 raise AssertionError(f"train and {name} share {col}s")
+    return {"classes": classes, "counts": counts, "dfs": dfs, "embs": embs, "evals": evals}
 
+
+def run_cell(ctx: dict, strategy: str, n: int, head: str, out: Path, args, head_init=None) -> dict:
+    """One training subset (strategy, n) and head: choose hyperparameters on dev_seen, score
+    every split of ctx["evals"]; files under out. Returns the metrics dict."""
+    classes, dfs, embs, evals = ctx["classes"], ctx["dfs"], ctx["embs"], ctx["evals"]
+    train, sel = dfs["train"], dfs["dev_seen"]
+    sub_mask = (train[f"{strategy}_rank"] < n).to_numpy()  # nested subset, see v2_data
+    sub, db = train[sub_mask], embs["train"][sub_mask]
+    creators, lab = set(sub["creator_id"]), sub["label"].to_numpy()
+    groups = {}
+    for s in evals:
+        groups[s] = row_groups(dfs[s], ctx["counts"], dfs[s]["creator_id"].isin(creators).to_numpy())
+        groups[s]["class_in_subset"] = dfs[s]["label"].isin(set(lab)).to_numpy()
+        groups[s]["class_not_in_subset"] = ~groups[s]["class_in_subset"]
+    lat, lon = sub["latitude"].to_numpy(), sub["longitude"].to_numpy()
+    res: dict = {"n_train": int(sub_mask.sum())}
+    if head == "knn":
+        nbrs = {s: knn(embs[s], db, max(args.k), device=args.device or None) for s in evals}
+        sweep = {}
+        for k in args.k:
+            sc = knn_country_scores(*nbrs["dev_seen"], lab, len(classes), k)
+            km = haversine(sel["latitude"].to_numpy(), sel["longitude"].to_numpy(),
+                           *knn_coordinates(*nbrs["dev_seen"], lat, lon, k))
+            sweep[k] = {"dev_seen_top1": float((sc.argmax(1) == sel["label"].to_numpy()).mean()),
+                        "dev_seen_geoscore": float(geoscore(km).mean())}
+        k_c, k_g = pick(sweep, "dev_seen_top1"), pick(sweep, "dev_seen_geoscore")
+        res.update({"k_sweep_dev_seen": sweep, "k_country": k_c, "k_coords": k_g})
+        for s in evals:
+            sc = knn_country_scores(*nbrs[s], lab, len(classes), k_c)
+            coords = knn_coordinates(*nbrs[s], lat, lon, k_g)
+            res[s] = score_split(out, s, dfs[s], sc, classes, coords, groups[s], args,
+                                 clusters_of(s, dfs[s]))
+    else:  # learning rate and stopping epoch chosen jointly by top-1 on dev_seen only
+        best, res["lr_sweep_dev_seen"] = None, {}
+        for lr in args.probe_lrs:
+            a = argparse.Namespace(**{**vars(args), "probe_lr": lr})
+            logits_lr, history = probe_logits(db, lab, embs["dev_seen"], sel["label"].to_numpy(),
+                                              {s: embs[s] for s in evals}, head_init, a,
+                                              args.device or "cpu")
+            top = max(history, key=lambda h: h["val_top1"])  # train_probe restores this epoch
+            res["lr_sweep_dev_seen"][lr] = {"dev_seen_top1": top["val_top1"],
+                                            "epoch": top["epoch"], "history": history}
+            if best is None or top["val_top1"] > best[0]:
+                best = (top["val_top1"], lr, top["epoch"], logits_lr)
+        _, res["best_lr"], res["best_epoch"], logits = best
+        for s in evals:
+            res[s] = score_split(out, s, dfs[s], logits[s], classes, None, groups[s], args,
+                                 clusters_of(s, dfs[s]))
+    return res
+
+
+def run(args: argparse.Namespace) -> list[dict]:
+    ctx = load_data(Path(args.data), Path(args.emb), args.eval_test)
+    head = (text_head(args.text_model or args.model, ctx["classes"], args.template)
+            if "probe" in args.heads else None)
     rows, root = [], Path(args.results_dir)
     for n in args.sizes:
-        sub_mask = (train[f"{args.strategy}_rank"] < n).to_numpy()  # nested subset, see v2_data
-        sub, db = train[sub_mask], embs["train"][sub_mask]
-        creators = set(sub["creator_id"])
-        groups = {s: row_groups(dfs[s], counts, dfs[s]["creator_id"].isin(creators).to_numpy())
-                  for s in evals}
-        lab, lat, lon = sub["label"].to_numpy(), sub["latitude"].to_numpy(), sub["longitude"].to_numpy()
-        base = f"{args.tag}_{args.strategy}_{n}"
-
-        if "knn" in args.heads:
-            nbrs = {s: knn(embs[s], db, max(args.k), device=args.device) for s in evals}
-            sweep = {}
-            for k in args.k:
-                sc = knn_country_scores(*nbrs["dev_seen"], lab, len(classes), k)
-                km = haversine(sel["latitude"].to_numpy(), sel["longitude"].to_numpy(),
-                               *knn_coordinates(*nbrs["dev_seen"], lat, lon, k))
-                sweep[k] = {"dev_seen_top1": float((sc.argmax(1) == sel["label"].to_numpy()).mean()),
-                            "dev_seen_geoscore": float(geoscore(km).mean())}
-            k_c, k_g = pick(sweep, "dev_seen_top1"), pick(sweep, "dev_seen_geoscore")
-            out = root / f"{base}_knn"
-            res = {"k_sweep_dev_seen": sweep, "k_country": k_c, "k_coords": k_g}
-            for s in evals:
-                sc = knn_country_scores(*nbrs[s], lab, len(classes), k_c)
-                coords = knn_coordinates(*nbrs[s], lat, lon, k_g)
-                res[s] = score_split(out, s, dfs[s], sc, classes, coords, groups[s], args)
-            rows += finish(out, res, args, n, "knn", evals)
-
-        if "probe" in args.heads:
-            head = text_head(args.text_model or args.model, classes, args.template)
-            logits, history = probe_logits(db, lab, embs["dev_seen"], sel["label"].to_numpy(),
-                                           {s: embs[s] for s in evals}, head, args, args.device)
-            out = root / f"{base}_probe"
-            res = {"history": history}
-            for s in evals:
-                res[s] = score_split(out, s, dfs[s], logits[s], classes, None, groups[s], args)
-            rows += finish(out, res, args, n, "probe", evals)
+        for h in args.heads:
+            out = root / f"{args.tag}_{args.strategy}_{n}_{h}"
+            res = run_cell(ctx, args.strategy, n, h, out, args, head)
+            rows += finish(out, res, args, n, h, ctx["evals"])
     summary = pd.DataFrame(rows)
     root.mkdir(parents=True, exist_ok=True)
     split = "test" if args.eval_test else "dev"
@@ -328,6 +366,23 @@ def finish(out: Path, res: dict, args, n: int, head: str, splits) -> list[dict]:
     return rows
 
 
+def add_head_args(ap: argparse.ArgumentParser) -> None:
+    """Arguments of run_cell (shared with phase1_eval)."""
+    ap.add_argument("--k", type=int, nargs="+", default=list(DEFAULT_K))
+    ap.add_argument("--eval-test", action="store_true",
+                    help="also score the official test split (final configurations only)")
+    ap.add_argument("--template", default=DEFAULT_TEMPLATE)
+    ap.add_argument("--probe-epochs", type=int, default=30)
+    ap.add_argument("--probe-lrs", type=float, nargs="+", default=[3e-4, 1e-3, 3e-3],
+                    help="probe learning rates; one is chosen with the epoch on dev_seen")
+    ap.add_argument("--label-smoothing", type=float, default=0.1)
+    ap.add_argument("--logit-scale", type=float, default=100.0)
+    ap.add_argument("--n-boot", type=int, default=1000)
+    ap.add_argument("--device", default="cuda",
+                    help="'' = CPU (numpy kNN, torch probe on cpu)")
+    ap.add_argument("--seed", type=int, default=42)
+
+
 def parse_args(argv=None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--data", required=True, help="v2_data.py output dir")
@@ -338,18 +393,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--strategy", choices=["nat", "bal"], default="bal")
     ap.add_argument("--sizes", type=int, nargs="+", required=True)
     ap.add_argument("--heads", nargs="+", choices=["knn", "probe"], default=["knn", "probe"])
-    ap.add_argument("--k", type=int, nargs="+", default=list(DEFAULT_K))
-    ap.add_argument("--eval-test", action="store_true",
-                    help="also score the official test split (final configurations only)")
-    ap.add_argument("--template", default=DEFAULT_TEMPLATE)
-    ap.add_argument("--probe-epochs", type=int, default=30)
-    ap.add_argument("--probe-lr", type=float, default=1e-3)
-    ap.add_argument("--label-smoothing", type=float, default=0.1)
-    ap.add_argument("--logit-scale", type=float, default=100.0)
-    ap.add_argument("--n-boot", type=int, default=1000)
-    ap.add_argument("--device", default="cuda", help="'' = numpy kNN on CPU (probe needs torch)")
     ap.add_argument("--results-dir", default="results/v2")
-    ap.add_argument("--seed", type=int, default=42)
+    add_head_args(ap)
     return ap.parse_args(argv)
 
 
