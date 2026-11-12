@@ -97,9 +97,9 @@ Full run: the same Cell 1, then
 Outputs: `/kaggle/working/full/` (logs, checks, progress, disk peaks, quota times) and the
 embeddings in `/kaggle/working/emb/`.
 
-**Phase 1 analysis.** `phase1_eval.py` asks whether geographic pretraining (StreetCLIP)
-improves sample efficiency over its matched base (CLIP L/14-336) and B/16, and whether the
-gap closes as N grows. Grid: backbone x ordering (nat, bal) x N (50K-500K) x method (kNN,
+**Phase 1 analysis.** `phase1_eval.py` compares StreetCLIP vs its CLIP L/14-336 base (one model
+pair; B/16 is also run) at small training sizes, and asks whether the gap closes as N grows.
+Sample efficiency is estimated post hoc via N-equivalence (`phase1_posthoc.py`). Grid: backbone x ordering (nat, bal) x N (50K-500K) x method (kNN,
 linear probe) x probe init (random, or zero-shot from the backbone's text encoder, which
 separates image-representation quality from text-encoder quality); each cell uses
 `geo_eval.run_cell` (k, or the probe's learning rate and stopping epoch jointly, chosen on
@@ -144,6 +144,12 @@ both attached inputs) retrains each declared cell once with its frozen hyperpara
 scores test into `<out>_test`, prints the primary results first (`primary.csv`) and labels
 every other output exploratory.
 
+`dev_results` in the pre-registration points to `runs/` (not in the repo). The same file is
+committed byte for byte as `results/v2/phase1_dev_results.csv` (dev splits only, no test
+column; stored with LF line endings, see `.gitattributes`), so the recorded hash can be checked:
+`sha256sum results/v2/phase1_dev_results.csv` must print `dev_results_sha256` of
+`configs/phase1_final.json`.
+
 What this does and does not guarantee: it is a self-discipline mechanism, not proof. The
 checks stop accidental test-driven choices (re-tuning on test, editing the plan after seeing
 results, scoring before committing), and the git history shows the order of events. But git
@@ -169,3 +175,18 @@ python -m geoguessr_ai.geo_eval --data /kaggle/working/v2 --emb /kaggle/working/
     --model openai/clip-vit-base-patch16 --tag clip_b16 --strategy bal \
     --sizes 50000 100000 200000 500000
 ```
+
+**Phase 3 (coordinates, development splits only).** `phase3_eval.py` asks whether StreetCLIP's
+advantage over CLIP L/14-336 holds in km. On the same nested subsets, one kNN search per subset
+feeds three coordinate predictors: the nearest neighbour, the weighted mean of the k neighbours on
+the sphere (3D unit vectors; weights the similarity or exp((sim - best sim)/tau), tau in {0.1,
+0.03, 0.01}), and the similarity-weighted geographic medoid (Phase 1's kNN coordinates, which it
+reproduces). k and tau are chosen by mean GeoScore on dev_seen only; median km is reported, not
+selected on. Country accuracy from a predicted point (the country of the nearest training image in
+the subset) is a sanity check against Phase 1. Paired StreetCLIP - L/14-336 differences per image
+(GeoScore, accuracy within 25/200/750/2500 km, km, country) and of median km use the Phase 1
+cluster bootstrap. The official test split is never read: `phase3_eval` has no test option, and a
+test-level coordinate evaluation gets its own pre-registration first. The Phase 1 final evaluation
+already computed exploratory kNN (medoid) test distance metrics (`results/v2/test_results.csv`);
+Phase 3 code never reads them and they were not looked at. On Kaggle (CPU-only session, the full
+run's output attached): `bash scripts/kaggle_phase3.sh`.

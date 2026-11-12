@@ -336,9 +336,9 @@ def cell_row(res: dict, backbone: str, ordering: str, n: int, method: str, init,
     return row
 
 
-def hit_diff(a: pd.DataFrame, b: pd.DataFrame) -> pd.Series:
-    """top1_a - top1_b per image id, over the images both scored."""
-    return (a.set_index("id")["top1"] - b.set_index("id")["top1"]).dropna()
+def hit_diff(a: pd.DataFrame, b: pd.DataFrame, col: str = "top1") -> pd.Series:
+    """col_a - col_b per image id, over the images both scored."""
+    return (a.set_index("id")[col] - b.set_index("id")[col]).dropna()
 
 
 def mean_ci(d: pd.Series, clusters: pd.Series, n_boot: int, seed: int) -> tuple[float, float]:
@@ -349,10 +349,10 @@ def mean_ci(d: pd.Series, clusters: pd.Series, n_boot: int, seed: int) -> tuple[
 
 
 def paired_gap(a: pd.DataFrame, b: pd.DataFrame, clusters: pd.Series, n_boot: int,
-               seed: int) -> dict:
+               seed: int, col: str = "top1") -> dict:
     """mean(top1_a - top1_b) over the images both scored, with a paired cluster bootstrap
     (one resample of clusters applies to both backbones). clusters: id -> cluster."""
-    d = hit_diff(a, b)
+    d = hit_diff(a, b, col)
     lo, hi = mean_ci(d, clusters, n_boot, seed)
     return {"gap": float(d.mean()), "gap_lo": lo, "gap_hi": hi, "n_images": len(d)}
 
@@ -367,9 +367,10 @@ def shrink(d_small: pd.Series, d_large: pd.Series, clusters: pd.Series, n_boot: 
             "shrink": float(x.mean()), "shrink_lo": lo, "shrink_hi": hi, "n_images": len(x)}
 
 
-def gaps(out: Path, data: Path, rows: pd.DataFrame, evals, n_boot: int,
-         seed: int) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """(gaps, shrink) tables, see the module docstring."""
+def gaps(out: Path, data: Path, rows: pd.DataFrame, evals, n_boot: int, seed: int,
+         stem: str = "hits", col: str = "top1") -> tuple[pd.DataFrame, pd.DataFrame]:
+    """(gaps, shrink) tables, see the module docstring; per-image values: column col of each
+    cell's {split}_{stem}.csv."""
     clusters = {}
     for s in evals:
         d = pd.read_csv(data / f"{s}.csv", dtype=str, keep_default_na=False)
@@ -379,12 +380,12 @@ def gaps(out: Path, data: Path, rows: pd.DataFrame, evals, n_boot: int,
         if not set(PAIR) <= set(grp["backbone"]):  # a pre-registered subset may lack a pair
             continue
         for s in evals:
-            a, b = (pd.read_csv(out / bb / f"{ordering}_{n}_{var}" / f"{s}_hits.csv",
+            a, b = (pd.read_csv(out / bb / f"{ordering}_{n}_{var}" / f"{s}_{stem}.csv",
                                 dtype={"id": str}) for bb in PAIR)
-            diffs[ordering, var, s, n] = hit_diff(a, b)
+            diffs[ordering, var, s, n] = hit_diff(a, b, col)
             out_rows.append({"ordering": ordering, "n": n, "variant": var,
                              "split": SPLIT_NAMES[s],
-                             **paired_gap(a, b, clusters[s], n_boot, seed)})
+                             **paired_gap(a, b, clusters[s], n_boot, seed, col)})
     paired = pd.DataFrame([k for k in diffs], columns=["ordering", "variant", "split", "n"])
     for (ordering, var), grp in paired.groupby(["ordering", "variant"]):
         small, large = grp["n"].min(), grp["n"].max()
@@ -398,7 +399,8 @@ def gaps(out: Path, data: Path, rows: pd.DataFrame, evals, n_boot: int,
     return pd.DataFrame(out_rows), pd.DataFrame(shrink_rows)
 
 
-def plot_scaling(rows: pd.DataFrame, path: Path, splits) -> None:
+def plot_scaling(rows: pd.DataFrame, path: Path, splits, metric: str = "top1",
+                 label: str = "country top-1") -> None:
     import matplotlib
 
     matplotlib.use("Agg")
@@ -414,16 +416,16 @@ def plot_scaling(rows: pd.DataFrame, path: Path, splits) -> None:
                 d = rows[(rows["backbone"] == bb) & (rows["variant"] == m)
                          & (rows["ordering"] == o)].sort_values("n")
                 for s, style in zip(splits, ("-", "--", ":")):
-                    if d.empty or f"{s}_top1" not in d:
+                    if d.empty or f"{s}_{metric}" not in d:
                         continue
-                    ax.plot(d["n"], d[f"{s}_top1"], style, color=color, marker="o",
+                    ax.plot(d["n"], d[f"{s}_{metric}"], style, color=color, marker="o",
                             label=f"{bb} {s}")
-                    ax.fill_between(d["n"], d[f"{s}_top1_lo"], d[f"{s}_top1_hi"], color=color,
-                                    alpha=0.15)
+                    ax.fill_between(d["n"], d[f"{s}_{metric}_lo"], d[f"{s}_{metric}_hi"],
+                                    color=color, alpha=0.15)
             ax.set_xscale("log")
             ax.set_title(f"{m}, {o}")
             ax.set_xlabel("training images N")
-            ax.set_ylabel("country top-1")
+            ax.set_ylabel(label)
             ax.grid(alpha=0.3)
     axes[0][0].legend(fontsize=7)
     fig.tight_layout()
@@ -431,7 +433,7 @@ def plot_scaling(rows: pd.DataFrame, path: Path, splits) -> None:
     plt.close(fig)
 
 
-def plot_gap(gp: pd.DataFrame, path: Path) -> None:
+def plot_gap(gp: pd.DataFrame, path: Path, label: str = "top-1 difference (paired)") -> None:
     import matplotlib
 
     matplotlib.use("Agg")
@@ -451,7 +453,7 @@ def plot_gap(gp: pd.DataFrame, path: Path) -> None:
             ax.set_xscale("log")
             ax.set_title(f"{PAIR[0]} - {PAIR[1]}: {m}, {o}")
             ax.set_xlabel("training images N")
-            ax.set_ylabel("top-1 difference (paired)")
+            ax.set_ylabel(label)
             ax.grid(alpha=0.3)
     axes[0][0].legend(fontsize=8)
     fig.tight_layout()
