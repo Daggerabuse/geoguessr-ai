@@ -167,7 +167,7 @@ def grid_edge(row, args) -> str:
     if len(lrs) > 1 and row["lr"] >= lrs[-1]:
         flags.append("lr_high")
     # best epoch in the final 10% of a run that used them all: more epochs might still help
-    if row["epoch"] > 0.9 * args.probe_epochs and row.get("stopped_early") != True:  # noqa: E712 (NaN, numpy bools)
+    if row["epoch"] > 0.9 * args.probe_epochs and row.get("stopped_early") != True:  # == True: NaN / numpy bools
         flags.append("last_epoch")
     return ";".join(flags)
 
@@ -175,7 +175,7 @@ def grid_edge(row, args) -> str:
 def edge_summary(table: pd.DataFrame, args) -> str:
     p, k = table[table["method"] == "probe"], table[table["method"] == "knn"]
     has = lambda t, f: int(t["grid_edge"].str.contains(f).sum())
-    stopped = int((p["stopped_early"] == True).sum())  # noqa: E712 (NaN in old rows)
+    stopped = int((p["stopped_early"] == True).sum())  # == True: NaN in old rows
     return (f"grid edges: probe {len(p)} cells: lr_low {has(p, 'lr_low')}, lr_high "
             f"{has(p, 'lr_high')}, last_epoch {has(p, 'last_epoch')} (stopped early: {stopped}); "
             f"knn {len(k)} cells: k_min {has(k, 'k_min')}, k_max {has(k, 'k_max')}")

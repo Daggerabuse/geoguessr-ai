@@ -237,7 +237,7 @@ def test_final_eval_writes_to_a_separate_directory_and_leaves_dev_untouched(fina
 
 
 def test_final_eval_uses_the_frozen_hyperparameters_only(final, monkeypatch):
-    root, args, final_args, _, path = final
+    root, _args, final_args, _, path = final
     reg = json.loads(path.read_text())
     probe = [c for c in reg["cells"] if c["method"] == "probe"]
     probe[0]["lr"], probe[0]["epoch"] = 0.123, 2  # values no search would give: must be used
@@ -529,8 +529,8 @@ def test_partial_sweep_resume_runs_only_the_missing_lr(setup, monkeypatch, capsy
     table = pe.run(pe.parse_args([*args, *ONE]))
     assert calls == [0.1]  # only the missing lr is trained
     m = json.loads((d / "geo_metrics.json").read_text())
-    for k, e in old.items():  # stored entries reused as they were (plus their settings)
-        assert json.dumps({f: m["lr_sweep_dev_seen"][k][f] for f in e}) == json.dumps(e)
+    for k, entry in old.items():  # stored entries reused as they were (plus their settings)
+        assert json.dumps({f: m["lr_sweep_dev_seen"][k][f] for f in entry}) == json.dumps(entry)
     assert m["reused_lrs"] == OLD_LRS and "settings" in m["lr_sweep_dev_seen"]["0.1"]
     assert {f: (d / f).read_bytes() for f in hits} == hits  # the stored winner's scores stand
     r = table.iloc[0]

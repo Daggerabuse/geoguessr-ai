@@ -44,8 +44,8 @@ esac
 def _env(tmp_path, **extra):
     bin_ = tmp_path / "bin"
     bin_.mkdir()
-    for name, body in (("python", STUB), ("nvidia-smi", "#!/usr/bin/env bash\n"
-                        "[ \"${1:-}\" = -L ] && printf 'GPU 0\\nGPU 1\\n' || echo 'Tesla T4'\n"),
+    for name, body in (("python", STUB), ("nvidia-smi", ("#!/usr/bin/env bash\n"
+                        "[ \"${1:-}\" = -L ] && printf 'GPU 0\\nGPU 1\\n' || echo 'Tesla T4'\n")),
                        ("free", "#!/usr/bin/env bash\necho free\n")):
         (bin_ / name).write_text(body, newline="\n")
         (bin_ / name).chmod(0o755)
