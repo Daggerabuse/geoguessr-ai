@@ -20,7 +20,6 @@ from inference import preprocess, softmax, top_k
 MODEL_REPO = os.environ.get("MODEL_REPO", "Daggerabuse/geoguessr-clip-vitb16")
 GITHUB_URL = "https://github.com/Daggerabuse/geoguessr-ai"
 
-torch.set_grad_enabled(False)
 path = Path(snapshot_download(MODEL_REPO))
 cfg = json.loads((path / "inference_config.json").read_text())
 classes = json.loads((path / "classes.json").read_text())
@@ -34,8 +33,9 @@ def predict(image):
     if image is None:
         return None
     px = torch.from_numpy(preprocess(image, cfg, tta=True))
-    emb = torch.nn.functional.normalize(vision(pixel_values=px).image_embeds.float(), dim=-1)
-    logits = (cfg["logit_scale"] * emb @ head.T).mean(0)  # mean over the 3 crops
+    with torch.inference_mode():
+        emb = torch.nn.functional.normalize(vision(pixel_values=px).image_embeds.float(), dim=-1)
+        logits = (cfg["logit_scale"] * emb @ head.T).mean(0)  # mean over the 3 crops
     return top_k(softmax(logits.numpy().astype(np.float64)), labels, k=5)
 
 

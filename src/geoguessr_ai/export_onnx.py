@@ -66,7 +66,6 @@ def build_classifier(vision, head, logit_scale: float):
 
 def load_folder(folder: Path):
     """(classifier, inference_config, classes) from an export_hf folder."""
-    import torch
     from safetensors.torch import load_file
     from transformers import CLIPVisionModelWithProjection
 
@@ -79,8 +78,8 @@ def load_folder(folder: Path):
     head = load_file(folder / cfg.get("head_file", "head.safetensors"))[cfg.get("head_key", "head")]
     if head.shape != (len(classes), vision.config.projection_dim):
         raise ValueError(f"head shape {tuple(head.shape)} does not match classes/projection_dim")
-    torch.set_grad_enabled(False)
-    return build_classifier(vision, head, cfg["logit_scale"]), cfg, classes
+    # frozen weights: outputs need no autograd (callers call .numpy()), global grad mode untouched
+    return build_classifier(vision, head, cfg["logit_scale"]).requires_grad_(False), cfg, classes
 
 
 def write_tiny_folder(out: Path, n_classes: int = 33, image_size: int = 32) -> Path:
@@ -122,9 +121,10 @@ def export_fp32(model, image_size: int, path: Path, opset: int = OPSET) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     dummy = torch.zeros(3, 3, image_size, image_size)
     batch = torch.export.Dim("batch", min=1, max=64)
-    prog = torch.onnx.export(model, (dummy,), input_names=[INPUT_NAME], output_names=[OUTPUT_NAME],
-                             dynamic_shapes={"pixel_values": {0: batch}}, opset_version=opset,
-                             dynamo=True, optimize=True)
+    with torch.no_grad():
+        prog = torch.onnx.export(model, (dummy,), input_names=[INPUT_NAME], output_names=[OUTPUT_NAME],
+                                 dynamic_shapes={"pixel_values": {0: batch}}, opset_version=opset,
+                                 dynamo=True, optimize=True)
     prog.save(str(path), external_data=False)
     # The exporter's intermediate shape annotations (value_info) contain an entry that
     # onnx shape inference rejects, which stops quantize_dynamic; value_info is optional
@@ -237,7 +237,8 @@ def verify(folder: Path, onnx_dir: Path, images: list[Path], tta: bool = True) -
         with Image.open(p) as im:
             x = np.stack(eval_views(im.convert("RGB"), size, tta))
         t = time.perf_counter()
-        out["torch"].append(model(torch.from_numpy(x)).numpy().mean(0))
+        with torch.no_grad():
+            out["torch"].append(model(torch.from_numpy(x)).numpy().mean(0))
         secs["torch"] += time.perf_counter() - t
         for k, s in sess.items():
             t = time.perf_counter()

@@ -275,6 +275,51 @@ Evaluation: short side 224 + center crop; `--tta` averages left/center/right cro
 
 `data/` and `models/` are not tracked; `results/` is.
 
+## V2: Does geographic pretraining improve sample efficiency? (OSV-5M, 216 countries)
+
+**Question.** StreetCLIP is CLIP ViT-L/14-336 further pretrained on street-level imagery for geolocation. With the same architecture and resolution, does that geographic pretraining make a frozen backbone more sample-efficient for country classification — and does the advantage disappear as labelled data grows?
+
+**Answer (pre-registered test, Holm-corrected).** At 50K training images StreetCLIP beats its matched base (CLIP L/14-336) on the official OSV-5M test set for every classifier and sampling scheme, by **+1.0 to +3.1 top-1 points** (6/6 hypotheses supported). Whether the gap shrinks with more data depends on the classifier: for **kNN** it shrinks (+3.1 → +1.7 pt, balanced sampling), but with a **trained linear probe** a 0.7–1.8 pt advantage persists at 500K images (3/6 shrink hypotheses supported). Backbone scale matters far more: CLIP B/16 is 13–17 pt behind L/14 on test at every N.
+
+### Setup
+- **Data:** OSV-5M (4.89M train / 210K test street-view images), 216 countries present in both splits. Creator-disjoint `dev_unseen` (20K) and a `dev_seen` split (19.9K, one image per sequence) for model selection; the official test set was only read once, at the end.
+- **Backbones:** CLIP ViT-B/16, CLIP ViT-L/14-336, StreetCLIP (frozen).
+- **Training subsets:** nested 50K / 100K / 200K / 500K, in two orderings — `nat` (natural country distribution) and `bal` (country-balanced).
+- **Classifiers:** kNN, and a linear probe initialised either randomly or from the zero-shot text head. Hyperparameters (k, learning rate, epoch) selected on `dev_seen` only.
+- **Scale:** 803,889 train/dev images × 3 backbones embedded in a single ~6.6 h session on 2× T4 (free Kaggle), streaming 246 GB of ZIPs with ≤13 GB disk; 210,122 test images × 3 backbones in 1.7 h.
+
+### Evaluation protocol
+- **Pre-registration:** frozen hyperparameters and 12 primary hypotheses (H1: gap > 0 at 50K; H2: gap(50K) − gap(500K) > 0, for each classifier × ordering) were committed *before* any test image was embedded (`configs/phase1_final.json`).
+- **Statistics:** paired cluster bootstrap over sequences (10,000 resamples), one-sided p-values, Holm–Bonferroni across all 12 (family-wise α = 0.05). Everything else is labelled exploratory.
+- **Honesty note:** the pre-registration is a self-discipline mechanism based on git timestamps, not cryptographic proof.
+
+### Results (test set, StreetCLIP − L/14-336, top-1 points)
+
+| | kNN bal | kNN nat | probe (random) bal | probe (random) nat | probe (zero-shot) bal | probe (zero-shot) nat |
+|---|---|---|---|---|---|---|
+| **H1:** gap at 50K | **+3.08** ✅ | **+2.12** ✅ | **+1.62** ✅ | **+1.04** ✅ | **+1.34** ✅ | **+1.07** ✅ |
+| **H2:** gap shrinks 50K→500K | **+1.33** ✅ | **+0.53** ✅ | −0.18 ❌ | +0.07 ❌ | −0.18 ❌ | +0.37 ✅ |
+
+All supported hypotheses have Holm-adjusted p = 0.0012 (the floor for 10,000 resamples × 12 tests). The H2 effect for the zero-shot nat probe is statistically supported but small (0.4 pt).
+
+![Scaling curves](results/v2/scaling_test.png)
+![Paired gap vs N](results/v2/gap_test.png)
+
+### Exploratory findings
+- **Test is harder than dev** (≈17 pt below `dev_seen`, same backbone ranking). The country mix explains ~4–5 pt; most of the rest is concentrated in a few mid-sized countries whose test images come from a few dominant creators (one creator holds 22–34% of each such country's test images), and in long test sequences that dev never contains.
+- **The StreetCLIP advantage replicates on test and tends to be larger there** (same sign in 24/24 cells; the test gap exceeds the dev_seen gap in 22/24, by +0.55 pt on average).
+- **`bal` vs `nat`:** balanced sampling costs 4–17 pt on head countries but gains 12–22 pt in fixed-class macro accuracy, at roughly equal overall top-1 for the probes.
+
+### A methodological check that mattered
+In the first analysis run the probe learning-rate grid was binding (3e-3, the top value, was chosen in 43/48 cells), and the probe gaps at 500K looked small (+0.08 to +0.46 pt on dev_seen; not significant on dev_unseen for the balanced probes). Widening the grid to 3e-2 raised the balanced-probe gaps at 500K to about +0.8 pt on dev_seen. A second, final extension to 1e-1 — made under a stopping rule declared beforehand — changed dev_seen top-1 by at most 0.48 pt and the gaps barely. Without the grid-edge check, the probe results would have understated StreetCLIP's advantage.
+
+### Limitations
+- One seed per cell; 21/48 probe cells still pick a learning rate at the edge of the final grid (frozen by the pre-declared stopping rule; gains at the last extension were ≤0.5 pt).
+- StreetCLIP's own pretraining data may overlap with OSV-5M sources; that would favour StreetCLIP, yet the advantage stays small.
+- Country classification only; coordinate-level geolocation is future work.
+
+Full pipeline, splits and Kaggle instructions: [docs/V2_PIPELINE.md](docs/V2_PIPELINE.md).
+
 ## Future work
 
 - Split val by creator (not only by sequence) to reduce the val-test gap.

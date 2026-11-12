@@ -7,8 +7,10 @@ wheels/
 *.egg-info
 .idea/
 data/
+AGENTS.md
 CLAUDE.md
 *.ipynb_checkpoints
 models/
 # Virtual environments
 .venv
+runs/
