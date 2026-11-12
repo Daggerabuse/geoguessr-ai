@@ -14,7 +14,7 @@
 #   DEADLINE_MIN  wall-clock minutes (may be fractional). At the deadline a STOP marker
 #               ($OUT/STOP) makes phase3_eval finish the cell in hand and start no new one: it
 #               prints RESUME NEEDED and this script exits 3. phase3_eval is killed only
-#               GRACE_MIN (default 30) minutes later (RESUME NEEDED too; that cell is lost).
+#               GRACE_MIN (default 45) minutes later (RESUME NEEDED too; that cell is lost).
 #   SEED_FROM   a finished phase3_eval output dir (e.g. the earlier session's, attached as an
 #               input) copied into the empty output dir before running, to resume in a new
 #               session. Refused: not a directory, the output dir itself, a non-empty output
@@ -101,7 +101,7 @@ summary() {
 trap summary EXIT
 if [ -n "${DEADLINE_MIN:-}" ]; then
   [[ $DEADLINE_MIN =~ ^[0-9]+(\.[0-9]+)?$ ]] || fail "DEADLINE_MIN must be a number of minutes"
-  GRACE_MIN=${GRACE_MIN:-30}
+  GRACE_MIN=${GRACE_MIN:-45}
   SECS=$(awk -v m="$DEADLINE_MIN" 'BEGIN { printf "%d", m * 60 }')
   HARD=$((START + SECS + GRACE_MIN * 60))
   ( nap "$SECS"; touch "$STOP"; echo "DEADLINE: STOP written; the cell in hand finishes, no new one starts" ) & WATCH=$!
@@ -122,7 +122,7 @@ case $rc in
   0) ;;
   3) echo "RESUME NEEDED: rerun with the same settings (SEED_FROM only in a fresh session); finished cells are skipped"
      exit 3 ;;
-  124|137) echo "RESUME NEEDED: the hard limit (deadline + ${GRACE_MIN:-30} min) killed phase3_eval mid-cell; finished cells are cached"
+  124|137) echo "RESUME NEEDED: the hard limit (deadline + ${GRACE_MIN:-45} min) killed phase3_eval mid-cell; finished cells are cached"
      exit 3 ;;
   *) fail "phase3_eval exit $rc" ;;
 esac

@@ -232,7 +232,14 @@ dev_unseen) it saves the top-5 cell ids and their probabilities (`<split>_top_ce
 cell probe is missing): it keeps the masked global kNN top-1000 inside the probe's top-m cells (m
 in {1, 3, 5}, chosen on dev_seen) and applies `--hybrid-predictor`, else the top cell's centroid.
 The hybrid's cache key includes its probe source (the cell's key and the hash of its top-cells
-files), so a changed probe reruns exactly its hybrid cells.
+files), so a changed probe reruns exactly its hybrid cells. The cell probe's own key leaves out
+mask_km, device and dtype (it has no kNN; the device used is still recorded in its `row.json`), so
+probes trained with `--device cuda` are found by the CPU session's `--methods hybrid --device ''`;
+the kNN and hybrid keys keep all three. The cell probe trains on all of the subset's training
+images, including those within the near-duplicate mask radius of dev queries: only the kNN parts
+(Step 1 and the hybrid's neighbour search) are masked. This is identical for both backbones, so the
+paired StreetCLIP vs L/14-336 gap is unaffected, but kNN vs cell is not a like-for-like
+comparison.
 
 Decisions made before any Step 2 result (changes to the first Step 2 design):
 - **Cell-count selection uses the random init only.** 1K/2K/5K cells for StreetCLIP and L/14-336
@@ -240,7 +247,10 @@ Decisions made before any Step 2 result (changes to the first Step 2 design):
   `cell_count.json` and frozen for both inits, every backbone, ordering and N. (Before: the
   average over both inits.) Rationale: random init only fits the weekly GPU budget (selection
   with both inits ≈ 2.6 h vs ≈ 1.3 h). It stays neutral between the compared backbones (average
-  of StreetCLIP and L/14-336); the zero-shot variant uses the frozen count chosen this way.
+  of StreetCLIP and L/14-336); the zero-shot variant uses the frozen count chosen this way. The
+  selection refuses to run unless 500000 is among `--sizes` (or `--cell-target` is given), so a
+  `SIZES` subset cannot freeze a count chosen at a smaller N. Every later run rebuilds the
+  partition and aborts if its sha256 differs from the one in `cell_count.json`.
 - **The hybrid runs in a CPU-only session.** Cell probes (GPU) and hybrid (CPU) are separate
   runs: the hybrid's kNN is the Step 1 setting (numpy fp32, `--device ''`), so Step 1 and the
   hybrid share one numerical pin. (Before: kNN on cuda in the same GPU session.)
@@ -249,7 +259,7 @@ Decisions made before any Step 2 result (changes to the first Step 2 design):
 
 Sessions (`kaggle_phase3.sh`; env: `METHODS`, `BACKBONES`, `ORDERINGS`, `SIZES`, `PROBE_INITS`,
 `DEADLINE_MIN`, `SEED_FROM`). At `DEADLINE_MIN` a STOP marker lets the cell in hand finish, then
-the run prints RESUME NEEDED and exits 3 (hard kill GRACE_MIN, default 30, later; that cell is
+the run prints RESUME NEEDED and exits 3 (hard kill GRACE_MIN, default 45, later; that cell is
 lost). Finished cells are cached; `SEED_FROM=<earlier output dir>` copies it into the empty
 output of a fresh session (refused if it is not a phase3_eval output, the output dir itself, or
 the output is not empty). A cell probe of an init that is done is never retrained.

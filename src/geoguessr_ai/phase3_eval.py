@@ -34,10 +34,11 @@ Step 2, geocells (--methods cell hybrid; geocells.py: a quadtree from the pool c
                      (--hybrid-k): the --hybrid-predictor (medoid/mean, k and tau as above) over
                      the kept neighbours, else the top cell's centroid; m, k, tau on dev_seen.
 The cell count is chosen once (cell_geo), with the RANDOM init only: the cell probe of the PAIR
-backbones at nat and the largest N for every --cell-targets count; the count with the best
-average dev_seen GeoScore of the pair is recorded in cell_count.json and frozen for both inits,
-every backbone, ordering and N. The cell probe saves, per cell and split (dev_seen, dev), its
-top-5 cell ids and probabilities ({split}_top_cells.csv); --methods hybrid reads only those
+backbones at nat and N = SELECT_N for every --cell-targets count (refused unless SELECT_N is in
+--sizes); the count with the best average dev_seen GeoScore of the pair is recorded in
+cell_count.json and frozen for both inits, every backbone, ordering and N. A later run rebuilds
+that partition and aborts if its sha256 differs from the recorded one. The cell probe saves,
+per cell and split (dev_seen, dev), its top-5 cell ids and probabilities ({split}_top_cells.csv); --methods hybrid reads only those
 (no probe, no GPU: run it with --device '' for the CPU fp32 kNN of Step 1) and refuses if a
 cell is missing. --stop-file: once that file exists no new cell is started (the current one
 finishes), the run prints RESUME NEEDED and exits 3; finished cells are cached.
@@ -45,7 +46,9 @@ kNN numerics are pinned (--device, --knn-dtype; both recorded in every row.json)
 here and any later test run must use the same setting. A finished cell is reused only if its
 cache_key (cache_settings: data config hash, embedding cache identity, grids, mask, numerics,
 seed, n_boot, Phase 1 probe source; the hybrid: its cell's key and the hash of the cell's
-top-cells files, i.e. its probe source) is unchanged. Metrics follow OSV-5M (haversine km, GeoScore = 5000 * exp(-km / 1492.7), accuracy within
+top-cells files, i.e. its probe source) is unchanged. The cell probe's key has no mask or kNN
+numerics (it has no kNN): probes trained on cuda are reused by a --device '' hybrid run.
+Metrics follow OSV-5M (haversine km, GeoScore = 5000 * exp(-km / 1492.7), accuracy within
 1/25/200/750/2500 km); country_top1 is the country of the training image nearest to the predicted
 point, a sanity check against Phase 1. Paired StreetCLIP - L/14-336 differences per image
 (gaps_<metric>.csv, shrink_<metric>.csv; for km a lower value is better) and of median km
@@ -79,7 +82,8 @@ METHOD = "geo"
 PREDICTORS = ("top1", "mean", "medoid")
 BASELINES = ("constant", "centroid", "oracle", "bestk")
 PROBE_VARIANT = "probe_random"  # Phase 1 probe whose dev predictions feed geo_centroid
-CELL_TARGETS = (1000, 2000, 5000)  # geocell counts tried once (nat, largest N, PAIR)
+CELL_TARGETS = (1000, 2000, 5000)  # geocell counts tried once (nat, SELECT_N, PAIR)
+SELECT_N = 500_000  # the N of the cell-count selection (nat); it must be among --sizes
 HYBRID_M = (1, 3, 5)  # top-m probe cells the hybrid keeps neighbours in (chosen on dev_seen)
 TAUS = (None, 0.1, 0.03, 0.01)  # geo_mean weights: None = the cosine similarity itself
 GAP_METRICS = ("geoscore", "acc_25km", "acc_200km", "acc_750km", "acc_2500km", "country_top1", "km")
@@ -306,7 +310,11 @@ def majority_country(cells, labels, n_cells: int, cent, lat, lon) -> np.ndarray:
         out[tab.index.to_numpy()] = tab.columns.to_numpy()[tab.to_numpy().argmax(1)]
     empty = out < 0
     if empty.any():
-        out[empty] = g.nearest_label(cent[empty, 0], cent[empty, 1], lat, lon, labels)
+        if not ok.any():
+            raise ValueError("majority_country: no subset training image has a label >= 0")
+        # labelled images only: a -1 here would index the last text row (text[-1])
+        out[empty] = g.nearest_label(cent[empty, 0], cent[empty, 1], lat[ok], lon[ok],
+                                     labels[ok])
     return out
 
 
@@ -512,18 +520,21 @@ def cache_settings(args, data: Path, emb: Path, method: str = "knn", cells=None)
          "data_config_sha256": prereg.sha256(cfg) if cfg.exists() else None,
          "emb_encoder_sha256": prereg.sha256(enc) if enc.exists() else None,
          "emb_files": [[f.name, f.stat().st_size] for f in cache_files(emb, "train")],
-         "mask_km": args.mask_km, "knn_device": args.device or "cpu",
-         "knn_dtype": args.knn_dtype, "seed": args.seed, "n_boot": args.n_boot}
+         "seed": args.seed, "n_boot": args.n_boot}
+    # kNN numerics: not in the cell probe's key (no kNN), so probes trained on cuda stay valid
+    # for the CPU-only hybrid session
+    knn = {"mask_km": args.mask_km, "knn_device": args.device or "cpu",
+           "knn_dtype": args.knn_dtype}
     if method == "knn":
-        return {**s, "k": list(args.k), "taus": list(TAUS), "probe_variant": PROBE_VARIANT,
-                "phase1_dev": str(args.phase1_dev) if args.phase1_dev else None}
+        return {**s, **knn, "k": list(args.k), "taus": list(TAUS),
+                "probe_variant": PROBE_VARIANT, "phase1_dev": str(args.phase1_dev) if args.phase1_dev else None}
     s.update({"geocells_sha256": cells[0], "cell_target": cells[1],
               "probe_lrs": list(args.probe_lrs), "probe_epochs": args.probe_epochs,
               "probe_patience": args.probe_patience, "label_smoothing": args.label_smoothing,
               "logit_scale": args.logit_scale, "template": args.template,
               "probe_batch": PROBE_BATCH})
     if method == "hybrid":
-        s.update({"hybrid_k": args.hybrid_k, "hybrid_m": list(HYBRID_M),
+        s.update({**knn, "hybrid_k": args.hybrid_k, "hybrid_m": list(HYBRID_M),
                   "hybrid_predictor": args.hybrid_predictor, "k": list(args.k),
                   "taus": list(TAUS)})
     return s
@@ -690,7 +701,7 @@ def run_grid(args: argparse.Namespace, geo: dict | None) -> pd.DataFrame:
                         {**cell_row(res, bb, o, n, pred, ctx["evals"]), "method": m,
                          "seconds": res["seconds"], "cache_version": CACHE_VERSION,
                          "cache_key": key, "mask_km": args.mask_km,
-                         "knn_device": settings[m]["knn_device"],
+                         "knn_device": args.device or "cpu",
                          "knn_dtype": args.knn_dtype}, default=float))
                 masked = next(iter(res_all.values())).get("masking") or {}
                 print(f"{bb} {o} {n} {m}: {time.time() - t:.0f} s"
@@ -707,18 +718,28 @@ def run_grid(args: argparse.Namespace, geo: dict | None) -> pd.DataFrame:
 def cell_geo(args: argparse.Namespace) -> dict:
     """The frozen geocell partition: --cell-target, else the recorded choice (cell_count.json),
     else chosen now, once: the cell probe (random init only) for the PAIR backbones at nat and
-    the largest N for every CELL_TARGETS count, then the count with the best average dev_seen
-    GeoScore of the pair (pick_cell_target), frozen for both inits. Its cells are copied into
-    the main grid."""
+    N = SELECT_N (must be in --sizes) for every CELL_TARGETS count, then the count with the best
+    average dev_seen GeoScore of the pair (pick_cell_target), frozen for both inits. Its cells
+    are copied into the main grid. A recorded choice whose rebuilt partition has another sha256
+    is refused."""
     out, data = Path(args.out), Path(args.data)
     if args.cell_target:
         return make_geo(data, out, args.cell_target)
     f = out / "cell_count.json"
     if f.exists():
-        return make_geo(data, out, json.loads(f.read_text())["target"])
+        rec = json.loads(f.read_text())
+        geo = make_geo(data, out, rec["target"])
+        if geo["sha"] != rec.get("geocells_sha256"):  # else every probe would silently retrain
+            raise SystemExit(f"geocell partition for target {rec['target']} has sha256 "
+                             f"{geo['sha'][:16]}, but {f} recorded "
+                             f"{str(rec.get('geocells_sha256'))[:16]}: same data and geocells.py?")
+        return geo
     if "cell" not in args.methods:
         raise SystemExit(f"--methods hybrid needs {f} (or --cell-target): run --methods cell first")
-    n, rows, geos = max(args.sizes), [], {}
+    if SELECT_N not in args.sizes:
+        raise SystemExit(f"cell-count selection runs at nat N={SELECT_N}: include {SELECT_N} in "
+                         f"--sizes or pass --cell-target")
+    n, rows, geos = SELECT_N, [], {}
     for t in args.cell_targets:
         geos[t] = make_geo(data, out, t)
         a = argparse.Namespace(**{**vars(args), "out": str(out / "cell_select" / f"c{t}"),

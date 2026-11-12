@@ -256,6 +256,16 @@ def test_majority_country_ties_and_empty_cells():
     assert p3.majority_country(cells, labels, 3, cent, lat, lon).tolist() == [2, 1, 0]
 
 
+def test_majority_country_empty_cell_skips_unlabelled_images():
+    cells, labels = np.array([0, 0, 0]), np.array([4, -1, 2])
+    cent = np.array([[0.0, 0.0], [50.0, 50.0]])  # cell 1: nearest image is the unlabelled one
+    lat, lon = np.array([0.0, 50.1, 30.0]), np.array([0.0, 50.0, 30.0])
+    out = p3.majority_country(cells, labels, 2, cent, lat, lon)
+    assert out.tolist() == [2, 2] and (out >= 0).all()  # cell 0: tie 4/2 -> 2 (the -1 is ignored)
+    with pytest.raises(ValueError, match="label >= 0"):
+        p3.majority_country(cells, np.full(3, -1), 2, cent, lat, lon)
+
+
 def test_pick_cell_target_uses_only_the_pair_average_on_dev_seen():
     rows = pd.DataFrame([
         {"backbone": "streetclip", "cell_target": 1000, "dev_seen_geoscore": 3000, "dev_unseen_geoscore": 0},
@@ -300,6 +310,7 @@ def test_cell_and_hybrid_grid(setup, monkeypatch):  # noqa: F811
     monkeypatch.setattr(g, "probe_logits", spy_probe)
     monkeypatch.setattr(p3, "choose_hybrid", lambda nb, dbc, top, sel, *a: hybrid_sel.append(len(sel))
                         or real_choose(nb, dbc, top, sel, *a))
+    monkeypatch.setattr(p3, "SELECT_N", 90)  # the selection N on the tiny data
     args = ["--methods", "cell", "hybrid", "--cell-targets", "4", "8", "--probe-epochs", "3",
             "--probe-lrs", "0.01", "0.1", "--mask-km", "20", "--k", "1", "5"]
     table = p3.run(p3_args(tmp_path, *args))
@@ -331,6 +342,18 @@ def test_cell_and_hybrid_grid(setup, monkeypatch):  # noqa: F811
     calls = len(probe_calls)
     p3.run(p3_args(tmp_path, *args))  # everything cached: no probe trained again
     assert len(probe_calls) == calls
+    rec = json.loads((out / "cell_count.json").read_text())
+    (out / "cell_count.json").write_text(json.dumps({**rec, "geocells_sha256": "0" * 64}))
+    with pytest.raises(SystemExit, match="geocell partition"):  # a resumed run checks the partition
+        p3.run(p3_args(tmp_path, *args))
+    assert len(probe_calls) == calls
+
+
+def test_cell_count_selection_refuses_without_select_n(setup):  # noqa: F811
+    tmp_path, _ = setup
+    with pytest.raises(SystemExit, match="include 500000 in --sizes or pass --cell-target"):
+        p3.run(p3_args(tmp_path, "--methods", "cell", "--cell-targets", "4"))  # sizes 30 90
+    assert not (tmp_path / "p3" / "cell_count.json").exists()
 
 
 # ------------------------------------------- Step 2: saved top cells, CPU-only hybrid, stop/resume
@@ -382,6 +405,41 @@ def test_hybrid_runs_without_cuda_from_saved_top_cells(setup, monkeypatch):  # n
                                      "geo_hybrid_zeroshot"}
     assert again["knn_device"] == "cpu" and again["cache_key"] == first["cache_key"]
     assert again["dev_seen_geoscore"] == first["dev_seen_geoscore"]  # same top cells, same kNN
+
+
+def test_cell_key_has_no_knn_numerics(setup):  # noqa: F811
+    tmp_path, _ = setup
+    data, emb = tmp_path / "v2", tmp_path / "emb" / "streetclip"
+
+    def key(m, *extra):
+        return p3.cache_key(p3.cache_settings(p3_args(tmp_path, *extra), data, emb, m, ("x", 4)))
+
+    for flag in (["--device", "cuda"], ["--mask-km", "5"], ["--knn-dtype", "fp16"]):
+        assert key("cell", *flag) == key("cell")
+        assert key("knn", *flag) != key("knn") and key("hybrid", *flag) != key("hybrid")
+
+
+def test_cuda_cell_probes_serve_a_cpu_hybrid_run(setup, monkeypatch):  # noqa: F811
+    import torch
+
+    tmp_path, _ = setup
+    base = ["--backbones", "streetclip", "--orderings", "nat", "--sizes", "90", *CELL_ARGS,
+            "--probe-inits", "random"]
+    real = g.probe_logits
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)  # run() keeps --device cuda
+    monkeypatch.setattr(g, "probe_logits", lambda *a: real(*a[:-1], "cpu"))  # no GPU here
+    p3.run(p3_args(tmp_path, *base, "--methods", "cell", "--device", "cuda"))
+    d = tmp_path / "p3" / "streetclip"
+    assert json.loads((d / "nat_90_geo_cell_random" / "row.json").read_text())["knn_device"] == "cuda"
+
+    def no_probe(*a, **k):
+        raise AssertionError("the hybrid must not train a probe")
+
+    monkeypatch.setattr(g, "probe_logits", no_probe)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    table = p3.run(p3_args(tmp_path, *base, "--methods", "hybrid", "--device", ""))
+    assert set(table["variant"]) == {"geo_cell_random", "geo_hybrid_random"}
+    assert json.loads((d / "nat_90_geo_hybrid_random" / "row.json").read_text())["knn_device"] == "cpu"
 
 
 def test_hybrid_key_follows_its_probe_source_and_hybrid_alone_needs_cells(setup, monkeypatch):  # noqa: F811
