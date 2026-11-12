@@ -17,12 +17,11 @@ written to `audit.json` by the audit step.
 **Splits.** `train.csv`: the training pool, at most 3 frames per sequence, with two nested
 orderings (`nat_rank`: natural distribution, `bal_rank`: country round-robin); a subset of
 size N is `rank < N`, so smaller subsets are contained in larger ones. `dev_seen.csv`:
-20K images (1 per sequence) from seeded random sequences of photographers who keep other
+19,906 images (1 per sequence; 20K drawn, picks whose photographer would keep no other train sequence are dropped) from seeded random sequences of photographers who keep other
 sequences in train, like 98% of the official test images; these sequences leave the pool,
-and all choices (k, probe epoch) are made on dev_seen. Unlike the official test, it does not
+and all choices (k, probe learning rate and epoch) are made on dev_seen. Unlike the official test, it does not
 enforce a 1 km distance to training images. `dev.csv` ("dev_unseen", second report): images
-(1 per sequence) from a seeded 2% of the photographers, none of whom is in `train.csv`, so
-it measures generalization to new photographers and scores lower than test by design.
+(1 per sequence) from a seeded 2% of the photographers, none of whom is in `train.csv`, so it measures generalization to new photographers. (In practice the official test scored lower still; see the exploratory findings in the README.)
 `test.csv`: the full official test split. It is
 scored only with `geo_eval --eval-test` (final configurations), and no smoke test or
 benchmark reads it. Train rows sharing an id or a sequence with test are dropped (counted
