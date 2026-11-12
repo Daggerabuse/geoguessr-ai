@@ -25,12 +25,13 @@ set +x
 REPO_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
 eval "$(python -m geoguessr_ai.phase1 config "${1:?usage: kaggle_phase1.sh pilot|full|test}")"
-W=/kaggle/working
+K=${KAGGLE_ROOT:-/kaggle}  # only tests set KAGGLE_ROOT
+W=$K/working
 P=$W/$OUT_NAME
-RAW=/kaggle/temp/raw
-Z=/kaggle/temp/zips
-STAGING=/kaggle/temp/ft_staging
-ARCHIVE=/kaggle/temp/ft_archive
+RAW=$K/temp/raw
+Z=$K/temp/zips
+STAGING=$K/temp/ft_staging
+ARCHIVE=$K/temp/ft_archive
 V2=$W/v2
 EMB=$W/emb
 IDX=$EMB/zip_index
@@ -40,7 +41,7 @@ CONSUMERS="clip_l14_336 streetclip clip_b16 ft_archive"
 IDS="$V2/train.csv $V2/dev.csv $V2/dev_seen.csv"
 if [ "$MODE" = test ]; then  # the full run's manifests; embeddings in their own directory
   IN=${INPUT_DIR:-}
-  [ -n "$IN" ] || IN=$(find_input /kaggle/input) || { echo "attach the full run's output or set INPUT_DIR"; exit 1; }
+  [ -n "$IN" ] || IN=$(find_input "$K/input") || { echo "attach the full run's output or set INPUT_DIR"; exit 1; }
   V2=$IN/v2
   EMB=$W/emb_test
   IDX=$EMB/zip_index
@@ -63,7 +64,7 @@ echo "session_start_utc $(date -u +%FT%TZ)" > "$P/quota_times.txt"
 # in here: du fails on files deleted mid-scan, which must not end the sampling.
 ( set +e +o pipefail
   while :; do
-    t=$(du -sb /kaggle/temp 2>/dev/null | cut -f1); w=$(du -sb "$W" 2>/dev/null | cut -f1)
+    t=$(du -sb "$K/temp" 2>/dev/null | cut -f1); w=$(du -sb "$W" 2>/dev/null | cut -f1)
     echo "$(date +%s) ${t:-0} ${w:-0}"
     nap 10
   done ) > "$P/disk_bytes.log" 2>&1 &
@@ -76,8 +77,8 @@ summary() {
   step "summary ($MODE, exit $rc)"
   for m in clip_l14_336 streetclip clip_b16; do tail -n 1 "$EMB/$m/throughput.jsonl" 2>/dev/null; done
   cat "$P/zipq_stats.json" 2>/dev/null
-  du -sh "$W"/* /kaggle/temp/* 2>/dev/null | sort -h
-  df -h "$W" /kaggle/temp
+  du -sh "$W"/* "$K"/temp/* 2>/dev/null | sort -h
+  df -h "$W" "$K/temp"
   awk '$2 > t {t = $2} $3 > w {w = $3} END {printf "peak /kaggle/temp %.2f GB, peak /kaggle/working %.2f GB (%d samples)\n", t / 1e9, w / 1e9, NR}' \
     "$P/disk_bytes.log" | tee "$P/disk_peaks.txt"
   echo "session_end_utc $(date -u +%FT%TZ)" >> "$P/quota_times.txt"
@@ -91,7 +92,7 @@ step "$MODE: ${SHARDS// /,} -> $REPO, deadline ${DEADLINE_MIN} min (+${GRACE_MIN
 [ "$MODE" = test ] || [ -n "${HF_TOKEN:-}" ] || fail "HF_TOKEN not set (Kaggle Secrets)"
 nvidia-smi --query-gpu=index,name,memory.total --format=csv
 [ "$(nvidia-smi -L | wc -l)" -ge 2 ] || fail "this layout needs 2 GPUs"
-nproc; free -g; df -h "$W" /kaggle/temp
+nproc; free -g; df -h "$W" "$K/temp"
 
 if [ "$MODE" = test ]; then
 step "pre-registration: committed before any test image is read"
@@ -142,7 +143,7 @@ fi
 ( nap $((DEADLINE - $(date +%s) > 0 ? DEADLINE - $(date +%s) : 0)); echo "deadline" > "$Z/markers/STOP"
   echo "DEADLINE: STOP written; consumers finish their current zip" ) >> "$P/progress.log" 2>&1 & WATCH=$!
 python -u -m geoguessr_ai.phase1 progress --zip-dir "$Z" --index-dir "$IDX" --shards $SHARDS --source "$SOURCE" \
-  --consumers $CONSUMERS --ids $IDS --disk /kaggle/temp "$W" > >(tee -a "$P/progress.log") 2>&1 & PROG=$!
+  --consumers $CONSUMERS --ids $IDS --disk "$K/temp" "$W" > >(tee -a "$P/progress.log") 2>&1 & PROG=$!
 BG="$DU $WATCH $PROG"
 # wait for whichever ends first; the first failure writes ABORT so the others stop at once
 status=0
