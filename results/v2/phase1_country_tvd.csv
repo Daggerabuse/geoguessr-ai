@@ -1,0 +1,7 @@
+a,b,tvd
+test,dev_seen,0.46840013686065063
+test,dev_unseen,0.6241287840470169
+test,official_train,0.4585922930761442
+dev_seen,official_train,0.08125427369759537
+dev_unseen,official_train,0.5139389567982214
+dev_seen,dev_unseen,0.5389188234703105
