@@ -97,9 +97,9 @@ Full run: the same Cell 1, then
 Outputs: `/kaggle/working/full/` (logs, checks, progress, disk peaks, quota times) and the
 embeddings in `/kaggle/working/emb/`.
 
-**Phase 1 analysis.** `phase1_eval.py` asks whether geographic pretraining (StreetCLIP)
-improves sample efficiency over its matched base (CLIP L/14-336) and B/16, and whether the
-gap closes as N grows. Grid: backbone x ordering (nat, bal) x N (50K-500K) x method (kNN,
+**Phase 1 analysis.** `phase1_eval.py` compares StreetCLIP vs its CLIP L/14-336 base (one model
+pair; B/16 is also run) at small training sizes, and asks whether the gap closes as N grows.
+Sample efficiency is estimated post hoc via N-equivalence (`phase1_posthoc.py`). Grid: backbone x ordering (nat, bal) x N (50K-500K) x method (kNN,
 linear probe) x probe init (random, or zero-shot from the backbone's text encoder, which
 separates image-representation quality from text-encoder quality); each cell uses
 `geo_eval.run_cell` (k, or the probe's learning rate and stopping epoch jointly, chosen on
@@ -143,6 +143,12 @@ and the start time. Finally `phase1_eval --eval-test --prereg configs/phase1_fin
 both attached inputs) retrains each declared cell once with its frozen hyperparameters,
 scores test into `<out>_test`, prints the primary results first (`primary.csv`) and labels
 every other output exploratory.
+
+`dev_results` in the pre-registration points to `runs/` (not in the repo). The same file is
+committed byte for byte as `results/v2/phase1_dev_results.csv` (dev splits only, no test
+column; stored with LF line endings, see `.gitattributes`), so the recorded hash can be checked:
+`sha256sum results/v2/phase1_dev_results.csv` must print `dev_results_sha256` of
+`configs/phase1_final.json`.
 
 What this does and does not guarantee: it is a self-discipline mechanism, not proof. The
 checks stop accidental test-driven choices (re-tuning on test, editing the plan after seeing
