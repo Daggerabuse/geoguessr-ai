@@ -103,26 +103,47 @@ def summarize(per_image: dict[str, np.ndarray], km: np.ndarray | None, clusters,
 # ----------------------------------------------------------------- kNN
 
 
-def knn(query: np.ndarray, db: np.ndarray, k: int, device: str | None = None):
+def knn(query: np.ndarray, db: np.ndarray, k: int, device: str | None = None,
+        dtype: str | None = None, exclude: tuple[np.ndarray, np.ndarray] | None = None):
     """Top-k cosine neighbours (rows are L2-normalized). Returns (sims, idx), best first.
 
     device: run the matrix products with torch on that device (e.g. "cuda"); None = numpy.
+    dtype: "fp16" or "fp32"; None = fp16 on a torch device, fp32 in numpy (Phase 1's setting).
+      numpy "fp16" emulates the GPU path: fp16 inputs, fp32 products, scores rounded to fp16.
+    exclude: (query rows, db rows) pairs that are never returned (score set to -inf).
     """
     k = min(k, len(db))
     chunk = 1024 if device else 256  # one chunk of scores: chunk x len(db) values
+    half = dtype == "fp16" or (dtype is None and bool(device))
     sims, idx = [], []
+    if exclude is not None:
+        order = np.argsort(exclude[0], kind="stable")
+        ex_q, ex_d = np.asarray(exclude[0])[order], np.asarray(exclude[1])[order]
     if device:
         import torch
 
-        dbt = torch.from_numpy(db).to(device, dtype=torch.float16)
+        tdt = torch.float16 if half else torch.float32
+        dbt = torch.from_numpy(db).to(device, dtype=tdt)
+    elif half:
+        db = db.astype(np.float16).astype(np.float32)
     for s in range(0, len(query), chunk):
+        if exclude is not None:
+            a, b = np.searchsorted(ex_q, [s, s + chunk])
+            rows, cols = ex_q[a:b] - s, ex_d[a:b]
         if device:
-            q = torch.from_numpy(query[s : s + chunk]).to(device, dtype=torch.float16)
-            v, i = (q @ dbt.T).topk(k, dim=1)
+            q = torch.from_numpy(query[s : s + chunk]).to(device, dtype=tdt)
+            sc = q @ dbt.T
+            if exclude is not None and len(rows):
+                sc[torch.from_numpy(rows).to(device), torch.from_numpy(cols).to(device)] = -torch.inf
+            v, i = sc.topk(k, dim=1)
             sims.append(v.float().cpu().numpy())
             idx.append(i.cpu().numpy())
             continue
-        sc = query[s : s + chunk] @ db.T
+        q = query[s : s + chunk]
+        sc = (q.astype(np.float16).astype(np.float32) @ db.T).astype(np.float16).astype(np.float32) \
+            if half else q @ db.T
+        if exclude is not None and len(rows):
+            sc[rows, cols] = -np.inf
         part = np.argpartition(-sc, k - 1, axis=1)[:, :k]
         ps = np.take_along_axis(sc, part, 1)
         o = np.argsort(-ps, axis=1)

@@ -10,6 +10,7 @@
 # recorded by the test embedding run. Output: /kaggle/working/phase1_eval_test.
 #   usage: bash scripts/kaggle_phase1_final.sh
 set -euo pipefail
+export PYTHONUNBUFFERED=1  # live Kaggle logs (python output through tee)
 . "$(dirname "${BASH_SOURCE[0]}")/find_input.sh"
 REPO_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 K=${KAGGLE_ROOT:-/kaggle}  # only tests set KAGGLE_ROOT

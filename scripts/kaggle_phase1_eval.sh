@@ -8,6 +8,7 @@
 #   /kaggle/input, or SEED_FROM=<its phase1_eval dir>) seeds OUT with its still-valid cells;
 #   SEED_FROM=none runs without it.
 set -euo pipefail
+export PYTHONUNBUFFERED=1  # live Kaggle logs (python output through tee)
 . "$(dirname "${BASH_SOURCE[0]}")/find_input.sh"
 IN=${1:-${INPUT_DIR:-}}
 [ -n "$IN" ] || IN=$(find_input /kaggle/input) || { echo "set INPUT_DIR"; exit 1; }

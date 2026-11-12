@@ -190,3 +190,27 @@ test-level coordinate evaluation gets its own pre-registration first. The Phase 
 already computed exploratory kNN (medoid) test distance metrics (`results/v2/test_results.csv`);
 Phase 3 code never reads them and they were not looked at. On Kaggle (CPU-only session, the full
 run's output attached): `bash scripts/kaggle_phase3.sh`.
+
+Review fixes (dev step). dev_seen shares creators with train without a distance buffer, so
+`--mask-km` (default 1) removes, per dev query, every training image within that haversine
+distance of its true location before the top-k search; the masked count per split is printed and
+stored (`*_masked_mean`, `*_masked_any_share`). Baselines on the same splits: a constant
+(spherical mean of the subset), predicted country -> that country's training centroid (Phase 1's
+frozen `probe_random` dev predictions from `--phase1-dev`, else the masked kNN vote), the oracle
+nearest training image after masking (a lower bound) and the oracle best of the retrieved
+neighbours. The constant and the nearest-image oracle do not depend on the backbone and get no
+paired gap. kNN numerics are pinned: `--knn-dtype` (default fp32) and the device are recorded in
+every `row.json`; the Kaggle script runs numpy fp32 on the CPU, and the Phase 3 selection and any
+test run must use the same setting (Phase 1 ran fp16 on the GPU). A finished cell is reused only
+if its `cache_key` matches: CACHE_VERSION, the sha256 of the data dir's `config.json`, the
+embedding cache (encoder.json hash, file names and sizes), the k and tau grids, mask_km, device,
+dtype, seed, n_boot and the Phase 1 probe source (`cache_settings` in `geo_metrics.json`). The
+`geo_medoid` vs Phase 1 check runs only with `--mask-km 0`.
+
+Exploratory Phase 1 check in the same session: with the test embedding run (`emb_test`) and the
+Phase 1 dev output attached, `kaggle_phase3.sh` ends with `scripts/analysis/phase1_posthoc.py`,
+which recomputes the kNN cells whose dev_seen-matched k differs between the two backbones (k shared
+by the pair's average dev_seen top-1) on the CPU in fp32. It writes only predicted countries and
+top-1 hits (`phase1_matched_k_cpu.csv.gz`) and the agreement with Phase 1's saved GPU fp16 dev
+predictions; locally `--run runs/phase1_final ... --cpu-preds <that file>` adds the matched test
+gap and the test prediction agreement.

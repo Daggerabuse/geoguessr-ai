@@ -9,8 +9,11 @@ saved per-image top-1 hits (test_hits.csv) and top-1 columns; no test distance c
   3  hyperparameter-matched kNN: one k per ordering x N for both backbones, the k with the
      highest pair-average dev_seen top-1 (the stored dev k sweep; ties -> smaller k). dev_seen
      gaps come from the sweep. A test gap is unchanged where both backbones already used that
-     k; otherwise both cells are recomputed on CPU in fp32, which needs the embeddings
-     (--data/--emb-root/--test-emb-root, i.e. on Kaggle); without them the row stays empty.
+     k; otherwise both cells are recomputed on CPU in fp32 at the shared and the frozen k, which
+     needs the embeddings: on Kaggle (--data/--emb-root/--test-emb-root, no --run; called by
+     kaggle_phase3.sh) it writes phase1_matched_k_cpu.csv.gz (per image: predicted country and
+     top-1 hit) and the dev agreement with the saved GPU fp16 predictions of --dev-run; locally,
+     --run ... --cpu-preds <that file> adds the test gap and the test agreement.
   4  N-equivalence: the N at which L/14-336 reaches StreetCLIP's 50K test top-1, by piecewise
      log-linear interpolation over the 4 measured N, with a cluster-bootstrap interval
      (sequence and creator clusters). inf = above the measured range (L/14 at 500K is still
@@ -138,7 +141,7 @@ def n_equivalence(hits, cl, n_boot, seed) -> pd.DataFrame:
     return t
 
 
-def matched_k(cfg: dict, dev_run: Path, hits: pd.DataFrame) -> pd.DataFrame:
+def matched_k(cfg: dict, dev_run: Path, hits: pd.DataFrame | None) -> pd.DataFrame:
     frozen = {(c["backbone"], c["ordering"], c["n"]): c["k_country"]
               for c in cfg["cells"] if c["variant"] == "knn"}
     rows = []
@@ -150,93 +153,130 @@ def matched_k(cfg: dict, dev_run: Path, hits: pd.DataFrame) -> pd.DataFrame:
             ks = sorted(sw[PAIR[0]])
             k = max(ks, key=lambda k: (np.mean([sw[bb][k] for bb in PAIR]), -k))
             fa, fb = frozen[(PAIR[0], o, n)], frozen[(PAIR[1], o, n)]
+            gap = np.nan if hits is None else (hits[(PAIR[0], o, n, "knn")].mean()
+                                               - hits[(PAIR[1], o, n, "knn")].mean())
             same = fa == fb == k
             rows.append({"ordering": o, "n": n, "k_streetclip": fa, "k_l14": fb, "k_shared": k,
                          "dev_seen_gap_frozen": sw[PAIR[0]][fa] - sw[PAIR[1]][fb],
                          "dev_seen_gap_matched": sw[PAIR[0]][k] - sw[PAIR[1]][k],
-                         "test_gap_frozen": hits[(PAIR[0], o, n, "knn")].mean()
-                         - hits[(PAIR[1], o, n, "knn")].mean(),
-                         "test_gap_matched": np.nan, "recompute": not same})
-            if same:
-                rows[-1]["test_gap_matched"] = rows[-1]["test_gap_frozen"]
+                         "test_gap_frozen": gap, "test_gap_matched": gap if same else np.nan,
+                         "recompute": not same})
     return pd.DataFrame(rows)
 
 
-def recompute(t: pd.DataFrame, args, hits: pd.DataFrame) -> pd.DataFrame:
-    """Kaggle path: both backbones' kNN cells at the shared k, CPU fp32 (geo_eval.knn with
-    device None), every eval split. Also reports agreement with the saved (GPU fp16) test hits
-    where the shared k equals the frozen one."""
-    todo = t[t["recompute"]]
-    if todo.empty:
-        return t
-    res = {}
+def cpu_predictions(t: pd.DataFrame, args) -> pd.DataFrame:
+    """Kaggle step: the kNN cells of t that need it, per backbone at the shared k and at its
+    frozen k, CPU fp32 (geo_eval.knn, device None, dtype fp32), on dev_seen, dev and test.
+    Per image: predicted country and top-1 hit only (no coordinate is predicted or read)."""
+    out = []
     for bb in PAIR:
         ctx = g.load_data(args.data, args.emb_root / bb, True, args.test_emb_root / bb)
-        train, n_cls = ctx["dfs"]["train"], len(ctx["classes"])
-        for r in todo.itertuples():
+        train, classes = ctx["dfs"]["train"], np.array(ctx["classes"])
+        for r in t[t["recompute"]].itertuples():
+            ks = sorted({r.k_shared, (r.k_streetclip, r.k_l14)[PAIR.index(bb)]})
             m = (train[f"{r.ordering}_rank"] < r.n).to_numpy()
             db, lab = ctx["embs"]["train"][m], train["label"].to_numpy()[m]
             for s in ctx["evals"]:
-                sc = g.knn_country_scores(*g.knn(ctx["embs"][s], db, r.k_shared), lab, n_cls,
-                                          r.k_shared)
-                hit = pd.Series(sc.argmax(1) == ctx["dfs"][s]["label"].to_numpy(),
-                                index=ctx["dfs"][s]["id"], dtype=float)
-                res[(bb, r.ordering, r.n, s)] = hit
-                if s == "test" and r.k_shared == (r.k_streetclip, r.k_l14)[PAIR.index(bb)]:
-                    saved = hits[(bb, r.ordering, r.n, "knn")].reindex(hit.index)
-                    t.loc[r.Index, f"cpu_vs_saved_agree_{bb}"] = float((saved == hit).mean())
-    for r in todo.itertuples():
-        for s in ("dev_seen", "dev", "test"):
-            gap = res[(PAIR[0], r.ordering, r.n, s)].mean() - res[(PAIR[1], r.ordering, r.n, s)].mean()
-            t.loc[r.Index, "test_gap_matched" if s == "test" else f"{s}_gap_matched_cpu"] = gap
+                nb = g.knn(ctx["embs"][s], db, max(ks), dtype="fp32")
+                for k in ks:
+                    pred = g.knn_country_scores(*nb, lab, len(classes), k).argmax(1)
+                    out.append(pd.DataFrame({
+                        "backbone": bb, "ordering": r.ordering, "n": r.n, "k": k, "split": s,
+                        "id": ctx["dfs"][s]["id"].to_numpy(), "pred": classes[pred],
+                        "top1": (pred == ctx["dfs"][s]["label"].to_numpy()).astype(int)}))
+            print(f"{bb} {r.ordering} {r.n}: k {ks} done", flush=True)
+        del ctx
+    return pd.concat(out, ignore_index=True)
+
+
+def merge_cpu(t: pd.DataFrame, cpu: pd.DataFrame, roots: dict) -> pd.DataFrame:
+    """Matched gaps from the CPU predictions, and per backbone the share of images whose CPU
+    fp32 prediction at the frozen k equals the saved (GPU fp16) one. roots: split -> the
+    phase1_eval dir holding that split's saved {split}_predictions.csv."""
+    t = t.copy()
+    for r in t[t["recompute"]].itertuples():
+        c = cpu[(cpu["ordering"] == r.ordering) & (cpu["n"] == r.n)]
+        for s in sorted(set(c["split"])):
+            top = {bb: c[(c["backbone"] == bb) & (c["k"] == r.k_shared) & (c["split"] == s)]
+                   ["top1"].mean() for bb in PAIR}
+            t.loc[r.Index, f"{s}_gap_matched_cpu"] = top[PAIR[0]] - top[PAIR[1]]
+            if s == "test":
+                t.loc[r.Index, "test_gap_matched"] = top[PAIR[0]] - top[PAIR[1]]
+            for bb, k in zip(PAIR, (r.k_streetclip, r.k_l14)):
+                if s not in roots:
+                    continue
+                f = roots[s] / bb / f"{r.ordering}_{r.n}_knn" / f"{s}_predictions.csv"
+                saved = pd.read_csv(f, dtype={"id": str}, usecols=["id", "pred"],
+                                    keep_default_na=False)
+                mine = c[(c["backbone"] == bb) & (c["k"] == k) & (c["split"] == s)]
+                both = mine.merge(saved, on="id", suffixes=("_cpu", "_saved"))
+                t.loc[r.Index, f"{s}_agree_{bb}_k{k}"] = float(
+                    (both["pred_cpu"] == both["pred_saved"]).mean())
+                t.loc[r.Index, f"{s}_agree_n"] = len(both)
     return t
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--run", type=Path, required=True, help="downloaded final eval output")
+    ap.add_argument("--run", type=Path, help="downloaded final eval output (local analyses)")
     ap.add_argument("--dev-run", type=Path, required=True, help="phase1_eval dir of dev_results")
-    ap.add_argument("--test-csv", type=Path, required=True, help="official OSV-5M test.csv")
+    ap.add_argument("--test-csv", type=Path, help="official OSV-5M test.csv (with --run)")
     ap.add_argument("--config", type=Path, default=Path("configs/phase1_final.json"))
     ap.add_argument("--out", type=Path, default=Path("results/v2"))
     ap.add_argument("--n-boot-neq", type=int, default=2000)
     ap.add_argument("--data", type=Path, help="(Kaggle) v2 split dir, for the matched-k recompute")
     ap.add_argument("--emb-root", type=Path, help="(Kaggle) train embeddings, one dir per backbone")
     ap.add_argument("--test-emb-root", type=Path, help="(Kaggle) test embeddings (emb_test)")
+    ap.add_argument("--cpu-preds", type=Path, help="the Kaggle step's phase1_matched_k_cpu.csv.gz")
     args = ap.parse_args()
+    kaggle = bool(args.data and args.emb_root and args.test_emb_root)
+    if not (kaggle or args.run):
+        ap.error("give --run (local analyses) or --data, --emb-root and --test-emb-root (Kaggle)")
+    if args.run and not args.test_csv:
+        ap.error("--run needs --test-csv")
     sys.stdout.reconfigure(encoding="utf-8")
     pd.set_option("display.width", 200)
     cfg = json.loads(args.config.read_text())
     hyps, seed = cfg["hypotheses"], cfg["settings"]["seed"]
-    hits = load_hits(args.run / "phase1_eval_test")
-    cl = test_clusters(args.test_csv, hits.index)
     args.out.mkdir(parents=True, exist_ok=True)
+    roots = {"dev_seen": args.dev_run, "dev": args.dev_run}
+    hits = None
+    if args.run:
+        roots["test"] = args.run / "phase1_eval_test"
+        hits = load_hits(roots["test"])
+        cl = test_clusters(args.test_csv, hits.index)
+        gt = gap_table(hits)
+        gt.to_csv(args.out / "phase1_posthoc_gap_table.csv")
+        print("1  test top-1 gap by N (pt)\n", (100 * gt).round(2))
 
-    gt = gap_table(hits)
-    gt.to_csv(args.out / "phase1_posthoc_gap_table.csv")
-    print("1  test top-1 gap by N (pt)\n", (100 * gt).round(2))
-
-    ci = creator_cis(hits, cl, hyps["primary"], hyps["n_boot"], seed)
-    prim = pd.read_csv(args.out / "phase1_primary.csv").set_index("id").loc[ci["id"]]
-    for a, b in (("estimate", "estimate"), ("seq_ci_lo", "ci_lo"), ("seq_ci_hi", "ci_hi"),
-                 ("seq_p_holm", "p_holm")):
-        assert np.allclose(ci[a].to_numpy(), prim[b].to_numpy()), f"{a} does not reproduce {b}"
-    ci.to_csv(args.out / "phase1_posthoc_creator_ci.csv", index=False)
-    show = ci[["id", "estimate", "seq_ci_lo", "seq_ci_hi", "creator_ci_lo", "creator_ci_hi",
-               "creator_p_holm"]].copy()
-    show.iloc[:, 1:6] = (100 * show.iloc[:, 1:6]).round(2)
-    print("2  creator-clustered CIs (pt; sequence CIs reproduce phase1_primary.csv)\n",
-          show.to_string(index=False))
+        ci = creator_cis(hits, cl, hyps["primary"], hyps["n_boot"], seed)
+        prim = pd.read_csv(args.out / "phase1_primary.csv").set_index("id").loc[ci["id"]]
+        for a, b in (("estimate", "estimate"), ("seq_ci_lo", "ci_lo"), ("seq_ci_hi", "ci_hi"),
+                     ("seq_p_holm", "p_holm")):
+            assert np.allclose(ci[a].to_numpy(), prim[b].to_numpy()), f"{a} does not reproduce {b}"
+        ci.to_csv(args.out / "phase1_posthoc_creator_ci.csv", index=False)
+        show = ci[["id", "estimate", "seq_ci_lo", "seq_ci_hi", "creator_ci_lo", "creator_ci_hi",
+                   "creator_p_holm"]].copy()
+        show.iloc[:, 1:6] = (100 * show.iloc[:, 1:6]).round(2)
+        print("2  creator-clustered CIs (pt; sequence CIs reproduce phase1_primary.csv)\n",
+              show.to_string(index=False))
 
     mk = matched_k(cfg, args.dev_run, hits)
-    if args.data and args.emb_root and args.test_emb_root:
-        mk = recompute(mk, args, hits)
+    cpu = None
+    if kaggle:
+        cpu = cpu_predictions(mk, args)
+        cpu.to_csv(args.out / "phase1_matched_k_cpu.csv.gz", index=False)
+    elif args.cpu_preds:
+        cpu = pd.read_csv(args.cpu_preds, dtype={"id": str}, keep_default_na=False)
+    if cpu is not None:
+        mk = merge_cpu(mk, cpu, roots)
     mk.to_csv(args.out / "phase1_posthoc_matched_k.csv", index=False)
     print("3  matched-k kNN\n", mk.round(4).to_string(index=False))
 
-    ne = n_equivalence(hits, cl, args.n_boot_neq, seed)
-    ne.to_csv(args.out / "phase1_posthoc_n_equivalence.csv", index=False)
-    print("4  N-equivalence\n", ne.round(4).to_string(index=False))
+    if args.run:
+        ne = n_equivalence(hits, cl, args.n_boot_neq, seed)
+        ne.to_csv(args.out / "phase1_posthoc_n_equivalence.csv", index=False)
+        print("4  N-equivalence\n", ne.round(4).to_string(index=False))
 
 
 if __name__ == "__main__":
