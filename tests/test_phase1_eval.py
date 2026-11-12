@@ -450,6 +450,7 @@ def test_grid_edge_flags():
 def test_probe_early_stopping_keeps_the_best_epoch(monkeypatch):
     import argparse
 
+    pytest.importorskip("torch")
     import torch
     from torch import nn
 
