@@ -107,7 +107,8 @@ def test_kaggle_scripts_locate_inputs_only_via_find_input():
                 assert "find_input /kaggle/input" in line, f"{f.name}: {line}"
 
 
-@pytest.mark.parametrize("name", ["kaggle_phase1.sh", "kaggle_phase1_eval.sh", "kaggle_phase1_final.sh"])
+@pytest.mark.parametrize("name", ["kaggle_phase1.sh", "kaggle_phase1_eval.sh", "kaggle_phase1_final.sh",
+                                  "kaggle_phase3.sh"])
 def test_scripts_parse(name):
     out = subprocess.run([BASH, "-n", (SCRIPTS / name).as_posix()], capture_output=True, text=True,
                          timeout=30, check=False)

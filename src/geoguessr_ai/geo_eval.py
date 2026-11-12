@@ -152,6 +152,48 @@ def knn_coordinates(sims, idx, db_lat, db_lon, k: int, chunk: int = 2048):
     return lat[r, best], lon[r, best]
 
 
+def to_xyz(lat, lon) -> np.ndarray:
+    """(..., 3) unit vectors of points given in degrees."""
+    p, q = np.radians(lat), np.radians(lon)
+    return np.stack([np.cos(p) * np.cos(q), np.cos(p) * np.sin(q), np.sin(p)], axis=-1)
+
+
+def from_xyz(xyz: np.ndarray):
+    """(lat, lon) in degrees of (..., 3) vectors of any nonzero length."""
+    x, y, z = np.moveaxis(np.asarray(xyz, dtype=float), -1, 0)
+    return np.degrees(np.arctan2(z, np.hypot(x, y))), np.degrees(np.arctan2(y, x))
+
+
+def knn_top1_coords(idx, db_lat, db_lon):
+    """Coordinates of the nearest neighbour."""
+    return db_lat[idx[:, 0]], db_lon[idx[:, 0]]
+
+
+def knn_mean_coords(sims, idx, db_lat, db_lon, k: int, tau: float | None = None):
+    """Weighted mean of the k neighbours on the sphere: the mean of their 3D unit vectors,
+    projected back (no lat/lon averaging, so it is correct across the antimeridian and near the
+    poles). Weights: the cosine similarity (tau None) or exp((sim - best sim) / tau). Where the
+    mean vector nearly vanishes (neighbours spread around the globe) the nearest neighbour is used."""
+    s = sims[:, :k].astype(np.float64)
+    w = s if tau is None else np.exp((s - s[:, :1]) / tau)
+    v = (w[:, :, None] * to_xyz(db_lat[idx[:, :k]], db_lon[idx[:, :k]])).sum(axis=1)
+    lat, lon = from_xyz(v)
+    bad = np.linalg.norm(v, axis=1) < 1e-6 * np.abs(w).sum(axis=1)
+    lat[bad], lon[bad] = db_lat[idx[bad, 0]], db_lon[idx[bad, 0]]
+    return lat, lon
+
+
+def nearest_label(lat, lon, db_lat, db_lon, db_label, chunk: int = 64) -> np.ndarray:
+    """Label of the database point nearest in space to each (lat, lon): the country of a predicted
+    coordinate without polygons (a top-1 or medoid prediction is a database point, so this is its
+    own label)."""
+    db, q = to_xyz(db_lat, db_lon), to_xyz(lat, lon)  # float64: float32 cannot tell ~2 km apart
+    out = np.empty(len(q), dtype=np.asarray(db_label).dtype)
+    for s in range(0, len(q), chunk):  # memory: chunk x len(db) dot products
+        out[s : s + chunk] = db_label[np.argmax(q[s : s + chunk] @ db.T, axis=1)]
+    return out
+
+
 # ----------------------------------------------------------------- probe (torch)
 
 

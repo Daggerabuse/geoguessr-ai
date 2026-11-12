@@ -169,3 +169,18 @@ python -m geoguessr_ai.geo_eval --data /kaggle/working/v2 --emb /kaggle/working/
     --model openai/clip-vit-base-patch16 --tag clip_b16 --strategy bal \
     --sizes 50000 100000 200000 500000
 ```
+
+**Phase 3 (coordinates, development splits only).** `phase3_eval.py` asks whether StreetCLIP's
+advantage over CLIP L/14-336 holds in km. On the same nested subsets, one kNN search per subset
+feeds three coordinate predictors: the nearest neighbour, the weighted mean of the k neighbours on
+the sphere (3D unit vectors; weights the similarity or exp((sim - best sim)/tau), tau in {0.1,
+0.03, 0.01}), and the similarity-weighted geographic medoid (Phase 1's kNN coordinates, which it
+reproduces). k and tau are chosen by mean GeoScore on dev_seen only; median km is reported, not
+selected on. Country accuracy from a predicted point (the country of the nearest training image in
+the subset) is a sanity check against Phase 1. Paired StreetCLIP - L/14-336 differences per image
+(GeoScore, accuracy within 25/200/750/2500 km, km, country) and of median km use the Phase 1
+cluster bootstrap. The official test split is never read: `phase3_eval` has no test option, and a
+test-level coordinate evaluation gets its own pre-registration first. The Phase 1 final evaluation
+already computed exploratory kNN (medoid) test distance metrics (`results/v2/test_results.csv`);
+Phase 3 code never reads them and they were not looked at. On Kaggle (CPU-only session, the full
+run's output attached): `bash scripts/kaggle_phase3.sh`.
