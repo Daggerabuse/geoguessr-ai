@@ -12,6 +12,7 @@ from geoguessr_ai import phase1_eval as pe
 from geoguessr_ai import prereg
 from tests.test_v2 import _meta, _write_data
 
+PREV = ["prev_lr", "prev_dev_seen_top1"]  # probe rows of a resumed cell only
 NOISE = {"streetclip": 0.3, "clip_l14_336": 1.5, "clip_b16": 2.0}  # streetclip separates best
 
 
@@ -82,9 +83,9 @@ def test_finished_cells_are_skipped_and_a_missing_one_is_redone(setup, monkeypat
     calls = []
     real = g.run_cell
 
-    def counting(ctx, strategy, n, head, *a):
+    def counting(ctx, strategy, n, head, *a, **kw):
         calls.append((strategy, n, head))
-        return real(ctx, strategy, n, head, *a)
+        return real(ctx, strategy, n, head, *a, **kw)
 
     monkeypatch.setattr(g, "run_cell", counting)
     loads = []
@@ -311,7 +312,7 @@ def test_probe_lr_and_epoch_are_chosen_on_dev_seen_only(setup, monkeypatch):
     def fake_probe(feats, labels, dev_feats, dev_labels, eval_feats, head_init, a, device):
         calls.append((a.probe_lr, len(dev_feats), list(dev_labels)))
         i = lrs.index(a.probe_lr)
-        history = [{"epoch": ep, "val_top1": [0.2, 0.9, 0.5, 0.4][i] - 0.1 * abs(ep - 2)}
+        history = [{"epoch": ep, "val_top1": [0.2, 0.9, 0.5, 0.4, 0.3][i] - 0.1 * abs(ep - 2)}
                    for ep in range(4)]  # dev_seen favours 3e-3 at epoch 2
         # outputs: a constant class per lr, so dev_unseen would favour another lr if it were used
         logits = {s: np.tile(np.eye(len(head_init))[(i + 1) % len(head_init)], (len(x), 1))
@@ -329,7 +330,7 @@ def test_probe_lr_and_epoch_are_chosen_on_dev_seen_only(setup, monkeypatch):
     assert all(n == len(dev_seen) and lab == dev_seen["label"].tolist() for _, n, lab in calls)
     m = json.loads((pe.cell_dir(root / "res", "streetclip", "bal", 90, "probe", "random")
                     / "geo_metrics.json").read_text())
-    assert m["best_lr"] == 3e-3 and set(m["lr_sweep_dev_seen"]) == {"0.001", "0.003", "0.01", "0.03"}
+    assert m["best_lr"] == 3e-3 and set(m["lr_sweep_dev_seen"]) == {"0.001", "0.003", "0.01", "0.03", "0.1"}
 
 
 def test_fixed_class_macro_keeps_actual_accuracy_of_classes_absent_from_training(tmp_path):
@@ -370,9 +371,9 @@ def _count_cells(monkeypatch):
     calls = []
     real = g.run_cell
 
-    def counting(ctx, strategy, n, head, *a):
+    def counting(ctx, strategy, n, head, *a, **kw):
         calls.append(head)
-        return real(ctx, strategy, n, head, *a)
+        return real(ctx, strategy, n, head, *a, **kw)
 
     monkeypatch.setattr(g, "run_cell", counting)
     return calls
@@ -393,7 +394,7 @@ def test_cache_version_bump_reruns_only_that_method(setup, monkeypatch):
     calls = _count_cells(monkeypatch)
     again = pe.run(pe.parse_args(args))
     assert calls.count("probe") == 3 * 2 * 2 * 2 and "knn" not in calls  # old probe rows: v1 < 2
-    knn = lambda t: t[t["method"] == "knn"].drop(columns="cache_version")
+    knn = lambda t: t[t["method"] == "knn"].drop(columns=["cache_version", *PREV], errors="ignore")
     pd.testing.assert_frame_equal(knn(first), knn(again))  # kNN rows untouched (same seconds)
     calls.clear()
     pe.run(pe.parse_args(args))
@@ -413,7 +414,8 @@ def test_seed_from_copies_only_valid_cells(setup, monkeypatch):
     dst = pe.cell_dir(out2, "streetclip", "nat", 30, "knn")
     assert sorted(p.name for p in dst.iterdir()) == sorted(p.name for p in src.iterdir())
     assert (dst / "dev_hits.csv").read_bytes() == (src / "dev_hits.csv").read_bytes()
-    knn = lambda t: t[t["method"] == "knn"].drop(columns=["seconds", "cache_version"]).reset_index(drop=True)
+    knn = lambda t: t[t["method"] == "knn"].drop(columns=["seconds", "cache_version", *PREV],
+                                                 errors="ignore").reset_index(drop=True)
     pd.testing.assert_frame_equal(knn(first), knn(again), check_exact=False, atol=1e-12)
     assert pe.seed_cells(root / "res", out2, "streetclip", [("nat", 30, "knn", None)]) == 0  # done
 
@@ -476,3 +478,110 @@ def test_probe_early_stopping_keeps_the_best_epoch(monkeypatch):
     assert run(curve, 3) == (8, 5)  # 0.7 at epoch 5 resets the count; 6, 7, 8 without gain
     assert run(curve, 2) == (4, 2)  # epochs 3 (a tie is not a gain) and 4: stop before the 0.7
     assert run(curve, 0) == (10, 5)  # 0 = off: all epochs
+
+
+ONE = ["--backbones", "streetclip", "--methods", "probe", "--probe-inits", "random",
+       "--orderings", "bal", "--sizes", "90"]
+OLD_LRS = [1e-3, 3e-3, 1e-2, 3e-2]
+
+
+def _fake_probe(monkeypatch, vals):
+    """probe_logits with a dev_seen curve peaking at epoch 2 at vals[lr]; predicts class 2 at
+    lr 0.1 and class 1 otherwise."""
+    calls = []
+
+    def fake(feats, labels, dev_feats, dev_labels, eval_feats, head_init, a, device):
+        calls.append(a.probe_lr)
+        history = [{"epoch": ep, "val_top1": vals[a.probe_lr] - 0.1 * abs(ep - 2)} for ep in range(4)]
+        row = np.eye(len(head_init))[2 if a.probe_lr == 0.1 else 1]
+        return {s: np.tile(row, (len(x), 1)) for s, x in eval_feats.items()}, history
+
+    monkeypatch.setattr(g, "probe_logits", fake)
+    return calls
+
+
+def _old_cell(root, args, monkeypatch, vals, legacy=True):
+    """One probe cell run on the 4-lr grid, then made a cache version 3 cell (legacy: its
+    sweep entries without settings, as version 3 wrote them)."""
+    calls = _fake_probe(monkeypatch, vals)
+    pe.run(pe.parse_args([*args, *ONE, "--probe-lrs", *map(str, OLD_LRS)]))
+    d = pe.cell_dir(root / "res", "streetclip", "bal", 90, "probe", "random")
+    m = json.loads((d / "geo_metrics.json").read_text())
+    if legacy:
+        settings = m["lr_sweep_dev_seen"]["0.003"]["settings"]
+        monkeypatch.setattr(pe, "LEGACY_PROBE_SETTINGS", {3: settings})
+        for e in m["lr_sweep_dev_seen"].values():
+            del e["settings"]
+        (d / "geo_metrics.json").write_text(json.dumps(m, indent=2))
+    row = json.loads((d / "row.json").read_text())
+    (d / "row.json").write_text(json.dumps({**row, "cache_version": 3}))
+    calls.clear()
+    return d, calls
+
+
+def test_partial_sweep_resume_runs_only_the_missing_lr(setup, monkeypatch, capsys):
+    root, args = setup
+    vals = {1e-3: 0.2, 3e-3: 0.9, 1e-2: 0.5, 3e-2: 0.4, 1e-1: 0.3}
+    d, calls = _old_cell(root, args, monkeypatch, vals)
+    old = json.loads((d / "geo_metrics.json").read_text())["lr_sweep_dev_seen"]
+    hits = {f: (d / f).read_bytes() for f in ("dev_seen_hits.csv", "dev_hits.csv")}
+    assert pe.partial(d, "probe")
+    table = pe.run(pe.parse_args([*args, *ONE]))
+    assert calls == [0.1]  # only the missing lr is trained
+    m = json.loads((d / "geo_metrics.json").read_text())
+    for k, e in old.items():  # stored entries reused as they were (plus their settings)
+        assert json.dumps({f: m["lr_sweep_dev_seen"][k][f] for f in e}) == json.dumps(e)
+    assert m["reused_lrs"] == OLD_LRS and "settings" in m["lr_sweep_dev_seen"]["0.1"]
+    assert {f: (d / f).read_bytes() for f in hits} == hits  # the stored winner's scores stand
+    r = table.iloc[0]
+    assert r["lr"] == 3e-3 and r["prev_lr"] == 3e-3 and r["cache_version"] == 4
+    assert "lr changes: 0 of 1 resumed probe cells" in capsys.readouterr().out
+    pe.run(pe.parse_args([*args, *ONE]))
+    assert calls == [0.1]  # done now
+
+
+def test_resume_reselects_over_the_merged_sweep(setup, monkeypatch, capsys):
+    root, args = setup
+    vals = {1e-3: 0.2, 3e-3: 0.9, 1e-2: 0.5, 3e-2: 0.4, 1e-1: 0.95}
+    d, calls = _old_cell(root, args, monkeypatch, vals)
+    out2 = root / "res2"  # resumed in a fresh output seeded with the partial cell
+    capsys.readouterr()
+    table = pe.run(pe.parse_args([*args, *ONE, "--out", str(out2), "--seed-from", str(root / "res")]))
+    assert calls == [0.1]
+    r = table.iloc[0]
+    assert r["lr"] == 0.1 and r["epoch"] == 2 and r["grid_edge"] == "lr_high"
+    assert r["dev_seen_top1"] != r["prev_dev_seen_top1"]  # rescored with the new winner
+    d2 = pe.cell_dir(out2, "streetclip", "bal", 90, "probe", "random")
+    assert (d2 / "dev_hits.csv").read_bytes() != (d / "dev_hits.csv").read_bytes()
+    out = capsys.readouterr().out
+    assert "lr changes: 1 of 1 resumed probe cells" in out and "lr 0.003 -> 0.1" in out
+
+
+def test_resume_reruns_lrs_whose_settings_differ(setup, monkeypatch):
+    root, args = setup
+    vals = {1e-3: 0.2, 3e-3: 0.9, 1e-2: 0.5, 3e-2: 0.4, 1e-1: 0.3}
+    d, calls = _old_cell(root, args, monkeypatch, vals, legacy=False)
+    m = json.loads((d / "geo_metrics.json").read_text())
+    sw = m["lr_sweep_dev_seen"]
+    sw["0.01"]["settings"]["seed"] = 7
+    sw["0.03"]["settings"]["probe_epochs"] = 30
+    del sw["0.001"]["settings"]  # legacy entry whose history disagrees with version 3
+    sw["0.001"]["history"] = sw["0.001"]["history"][:-1]
+    monkeypatch.setattr(pe, "LEGACY_PROBE_SETTINGS", {3: sw["0.003"]["settings"]})
+    m["best_lr"] = 0.01  # stored choice not the merged winner: the reused 3e-3 is refit
+    (d / "geo_metrics.json").write_text(json.dumps(m))
+    table = pe.run(pe.parse_args([*args, *ONE]))
+    assert calls == [1e-3, 1e-2, 3e-2, 0.1, 3e-3]
+    assert json.loads((d / "geo_metrics.json").read_text())["reused_lrs"] == [3e-3]
+    assert table.iloc[0]["lr"] == 3e-3
+
+
+def test_history_agrees_with_settings():
+    s = {"probe_epochs": 10, "probe_patience": 3}
+    h = lambda vals: [{"epoch": i, "val_top1": v} for i, v in enumerate(vals)]
+    assert pe.history_agrees({"epoch": 2, "stopped_early": True, "history": h([0, 1, 5, 4, 4, 4])}, s)
+    assert not pe.history_agrees({"epoch": 2, "stopped_early": True, "history": h([0, 1, 5, 4, 4])}, s)
+    full = h([0, 1, 2, 3, 4, 5, 6, 7, 9, 8, 8])
+    assert pe.history_agrees({"epoch": 8, "stopped_early": False, "history": full}, s)
+    assert not pe.history_agrees({"epoch": 7, "stopped_early": False, "history": full}, s)
+    assert not pe.history_agrees({"epoch": 8, "stopped_early": True, "history": full}, s)

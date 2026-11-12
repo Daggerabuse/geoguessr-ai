@@ -291,6 +291,9 @@ def top1(logits: np.ndarray, labels: np.ndarray) -> float:
     return float(evaluate(logits, labels)[0].mean()) if len(labels) else float("nan")
 
 
+PROBE_BATCH = 256
+
+
 def train_probe(model, feats, labels, val_feats, val_labels, args, device, history):
     """Train only the head; epoch 0 = zero-shot starting point. The best-val head is restored.
     args.probe_patience (optional, 0 = off): stop after that many epochs without a new best."""
@@ -313,8 +316,8 @@ def train_probe(model, feats, labels, val_feats, val_labels, args, device, histo
     for ep in range(1, args.probe_epochs + 1):
         perm = torch.randperm(len(feats), generator=gen).to(device)
         tot = 0.0
-        for s in range(0, len(perm), 256):
-            idx = perm[s : s + 256]
+        for s in range(0, len(perm), PROBE_BATCH):
+            idx = perm[s : s + PROBE_BATCH]
             loss = F.cross_entropy(
                 model.logits_from_embed(feats[idx]), y[idx], label_smoothing=args.label_smoothing
             )

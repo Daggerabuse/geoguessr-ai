@@ -115,6 +115,9 @@ def write(dev_out: Path, path: Path, args: argparse.Namespace) -> dict:
            "dev_results": str(results), "dev_results_sha256": sha256(results),
            "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
            "settings": {k: getattr(args, k) for k in SETTINGS},
+           "search": {"k": args.k, "probe_lrs": args.probe_lrs, "probe_epochs": args.probe_epochs,
+                      "probe_patience": args.probe_patience, "rule": pe.PROBE_GRID_RULE,
+                      "grid_edge": "per cell: a choice at an edge of this search grid"},
            "hypotheses": hypotheses(cells, pe.PAIR), "cells": cells}
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(reg, indent=2) + "\n")

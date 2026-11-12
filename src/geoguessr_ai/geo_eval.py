@@ -311,11 +311,26 @@ def run_frozen(ctx, out, args, head, head_init, frozen, res, sub, db, lab, group
     return res
 
 
+def probe_settings(args) -> dict:
+    """Everything a probe run at one lr depends on besides the lr, the cell's training subset
+    and its head init: a stored sweep entry is reused only if its settings equal these."""
+    from geoguessr_ai.train import PROBE_BATCH
+
+    return {"seed": args.seed, "probe_epochs": args.probe_epochs,
+            "probe_patience": args.probe_patience, "batch": PROBE_BATCH,
+            "label_smoothing": args.label_smoothing, "logit_scale": args.logit_scale,
+            "template": args.template}
+
+
 def run_cell(ctx: dict, strategy: str, n: int, head: str, out: Path, args, head_init=None,
-             frozen: dict | None = None) -> dict:
+             frozen: dict | None = None, prior: dict | None = None) -> dict:
     """One training subset (strategy, n) and head: choose hyperparameters on dev_seen (or use
     `frozen` ones, see run_frozen), score every split of ctx["evals"]; files under out. Returns
-    the metrics dict."""
+    the metrics dict.
+    prior (probe): this cell's earlier metrics dict (its files still under out). Its
+    lr_sweep_dev_seen entries whose settings equal probe_settings(args) are reused as stored;
+    only the other lrs of args.probe_lrs are trained, then lr and epoch are chosen over the
+    merged sweep. If the earlier choice still wins, its split scores (and files) stand."""
     classes, dfs, embs, evals = ctx["classes"], ctx["dfs"], ctx["embs"], ctx["evals"]
     train, sel = dfs["train"], dfs["dev_seen"]
     sub_mask = (train[f"{strategy}_rank"] < n).to_numpy()  # nested subset, see v2_data
@@ -347,19 +362,38 @@ def run_cell(ctx: dict, strategy: str, n: int, head: str, out: Path, args, head_
             res[s] = score_split(out, s, dfs[s], sc, classes, coords, groups[s], args,
                                  clusters_of(s, dfs[s]))
     else:  # learning rate and stopping epoch chosen jointly by top-1 on dev_seen only
-        best, res["lr_sweep_dev_seen"] = None, {}
-        for lr in args.probe_lrs:
+        settings, prior = probe_settings(args), prior or {}
+        stored = {float(k): v for k, v in prior.get("lr_sweep_dev_seen", {}).items()}
+
+        def fit(lr):
             a = argparse.Namespace(**{**vars(args), "probe_lr": lr})
             logits_lr, history = probe_logits(db, lab, embs["dev_seen"], sel["label"].to_numpy(),
                                               {s: embs[s] for s in evals}, head_init, a,
                                               args.device or "cpu")
             top = max(history, key=lambda h: h["val_top1"])  # train_probe restores this epoch
             stopped = history[-1]["epoch"] < args.probe_epochs  # early stopping (probe_patience)
-            res["lr_sweep_dev_seen"][lr] = {"dev_seen_top1": top["val_top1"], "epoch": top["epoch"],
-                                            "stopped_early": stopped, "history": history}
-            if best is None or top["val_top1"] > best[0]:
-                best = (top["val_top1"], lr, top["epoch"], stopped, logits_lr)
-        _, res["best_lr"], res["best_epoch"], res["stopped_early"], logits = best
+            return logits_lr, {"dev_seen_top1": top["val_top1"], "epoch": top["epoch"],
+                               "stopped_early": stopped, "history": history,
+                               "settings": settings}
+
+        sweep, best, logits, reused = {}, None, None, []
+        for lr in args.probe_lrs:
+            if stored.get(lr, {}).get("settings") == settings:
+                sweep[lr], logits_lr = stored[lr], None
+                reused.append(lr)
+            else:
+                logits_lr, sweep[lr] = fit(lr)
+            if best is None or sweep[lr]["dev_seen_top1"] > sweep[best]["dev_seen_top1"]:
+                best, logits = lr, logits_lr  # None: a reused entry (no logits kept)
+        e = sweep[best]
+        res.update({"lr_sweep_dev_seen": sweep, "reused_lrs": reused, "best_lr": best,
+                    "best_epoch": e["epoch"], "stopped_early": e["stopped_early"]})
+        if logits is None and prior.get("best_lr") == best and all(s in prior for s in evals):
+            for s in evals:  # the stored winner still wins: its scores and files stand
+                res[s] = prior[s]
+            return res
+        if logits is None:  # a reused lr wins that was not the stored choice: refit it
+            logits, _ = fit(best)
         for s in evals:
             res[s] = score_split(out, s, dfs[s], logits[s], classes, None, groups[s], args,
                                  clusters_of(s, dfs[s]))

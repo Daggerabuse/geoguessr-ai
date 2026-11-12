@@ -11,12 +11,17 @@ read only with --eval-test (into a separate results directory).
 
 Cells are cached: <out>/<backbone>/<ordering>_<N>_<variant>/row.json is written last, and a
 rerun skips every cell whose row.json carries the method's current CACHE_VERSION (a backbone
-whose cells are all done is not even loaded). --seed-from copies such finished cells from an
+whose cells are all done is not even loaded). A probe cell of an older version is partial: it
+is resumed, reusing the stored lr runs whose settings match (geo_eval.run_cell's prior; entries
+of cache version 3 carry no settings and get LEGACY_PROBE_SETTINGS if their history agrees),
+training only the missing lrs and choosing over the merged sweep; its row records the previous
+choice (prev_lr, prev_dev_seen_top1). --seed-from copies finished and partial cells from an
 earlier output first (e.g. the previous Kaggle run attached as input).
 
 Probe search: --probe-lrs x epochs 0..--probe-epochs, a run stopped after --probe-patience
 epochs without a dev_seen gain (this script's defaults differ from geo_eval's); results.csv's
-grid_edge column flags a choice at the edge of the search grid.
+grid_edge column flags a choice at the edge of the search grid. The lr grid is final
+(PROBE_GRID_RULE): a choice at its edge is kept and reported as a limitation.
 
 Outputs in <out>:
   results.csv   one row per cell: chosen k / lr / epoch; per split top-1/top-5 with intervals,
@@ -70,8 +75,14 @@ SPLIT_NAMES = {"dev_seen": "dev_seen", "dev": "dev_unseen", "test": "test"}
 GROUPS = ("reliable", "head", "middle", "tail")
 # bump a method's version when its search or scoring changes: only that method's cells rerun
 # (rows written before versioning count as 1)
-CACHE_VERSION = {"knn": 1, "probe": 3}
-PROBE_LRS, PROBE_EPOCHS, PROBE_PATIENCE = [1e-3, 3e-3, 1e-2, 3e-2], 60, 8
+CACHE_VERSION = {"knn": 1, "probe": 4}
+PROBE_LRS, PROBE_EPOCHS, PROBE_PATIENCE = [1e-3, 3e-3, 1e-2, 3e-2, 1e-1], 60, 8
+PROBE_GRID_RULE = ("final lr grid: it is not extended again; a cell whose chosen lr is at an "
+                   "edge of it keeps that choice, which is reported as a limitation (grid_edge)")
+# geo_eval.probe_settings of the probe runs of a cache version whose sweep entries lack them
+LEGACY_PROBE_SETTINGS = {3: {"seed": 42, "probe_epochs": 60, "probe_patience": 8, "batch": 256,
+                             "label_smoothing": 0.1, "logit_scale": 100.0,
+                             "template": g.DEFAULT_TEMPLATE}}
 
 
 def variant(method: str, init: str | None) -> str:
@@ -93,12 +104,49 @@ def cell_done(d: Path, method: str) -> bool:
     return row is not None and row["cache_version"] == CACHE_VERSION[method]
 
 
+def partial(d: Path, method: str) -> bool:
+    """A probe cell of an older version whose stored sweep a rerun can resume."""
+    return (method == "probe" and read_row(d) is not None and not cell_done(d, method)
+            and (d / "geo_metrics.json").exists())
+
+
+def history_agrees(e: dict, s: dict) -> bool:
+    """A stored sweep entry's history is what train_probe writes with settings s: epochs
+    0..last, the best (first maximum) is the entry's epoch, and it stopped exactly when s's
+    epochs or patience say."""
+    h = e.get("history") or []
+    if not h or [x["epoch"] for x in h] != list(range(len(h))):
+        return False
+    last, best = h[-1]["epoch"], e["epoch"]
+    stopped = last < s["probe_epochs"]
+    return (max(h, key=lambda x: x["val_top1"])["epoch"] == best
+            and e.get("stopped_early") == stopped
+            and (last - best == s["probe_patience"] if stopped
+                 else last == s["probe_epochs"] and last - best <= s["probe_patience"]))
+
+
+def load_prior(d: Path, method: str) -> dict | None:
+    """The stored metrics of a partial probe cell (geo_eval.run_cell's prior); entries without
+    settings get their cache version's LEGACY_PROBE_SETTINGS when their history agrees (the
+    others are rerun)."""
+    if not partial(d, method):
+        return None
+    prior = json.loads((d / "geo_metrics.json").read_text())
+    legacy = LEGACY_PROBE_SETTINGS.get(read_row(d)["cache_version"])
+    for e in prior.get("lr_sweep_dev_seen", {}).values():
+        if "settings" not in e and legacy and history_agrees(e, legacy):
+            e["settings"] = dict(legacy)  # the other fields stay as stored
+    return prior
+
+
 def seed_cells(src: Path, out: Path, backbone: str, cells) -> int:
-    """Copy cells finished at the current version from src (row.json last, as when written)."""
+    """Copy cells finished at the current version from src, and partial ones where out has
+    none (row.json last, as when written)."""
     copied = 0
     for c in cells:
         s, d = cell_dir(src, backbone, *c), cell_dir(out, backbone, *c)
-        if cell_done(d, c[2]) or not cell_done(s, c[2]):
+        if cell_done(d, c[2]) or not (cell_done(s, c[2]) or (partial(s, c[2])
+                                                              and read_row(d) is None)):
             continue
         # copyfile: no mode bits (the Kaggle input is read-only)
         shutil.copytree(s, d, ignore=shutil.ignore_patterns("row.json"), dirs_exist_ok=True,
@@ -131,6 +179,21 @@ def edge_summary(table: pd.DataFrame, args) -> str:
     return (f"grid edges: probe {len(p)} cells: lr_low {has(p, 'lr_low')}, lr_high "
             f"{has(p, 'lr_high')}, last_epoch {has(p, 'last_epoch')} (stopped early: {stopped}); "
             f"knn {len(k)} cells: k_min {has(k, 'k_min')}, k_max {has(k, 'k_max')}")
+
+
+def lr_changes(table: pd.DataFrame) -> str:
+    """Resumed probe cells whose chosen lr changed: old -> new lr and dev_seen top-1."""
+    if "prev_lr" not in table:
+        return "lr changes: no resumed probe cells"
+    t = table[table["prev_lr"].notna()]
+    ch = t[~np.isclose(t["prev_lr"].astype(float), t["lr"].astype(float))]
+    lines = [f"lr changes: {len(ch)} of {len(t)} resumed probe cells"]
+    for r in ch.sort_values(["backbone", "ordering", "variant", "n"]).to_dict("records"):
+        d = r["dev_seen_top1"] - r["prev_dev_seen_top1"]
+        lines.append(f"  {r['backbone']} {r['ordering']} {r['n']} {r['variant']}: lr "
+                     f"{r['prev_lr']:g} -> {r['lr']:g}, dev_seen top-1 {r['prev_dev_seen_top1']:.4f}"
+                     f" -> {r['dev_seen_top1']:.4f} ({100 * d:+.2f} pt)")
+    return "\n".join(lines)
 
 
 def final_setup(args: argparse.Namespace) -> dict:
@@ -422,7 +485,9 @@ def run(args: argparse.Namespace) -> pd.DataFrame:
             t = time.time()
             ctx = g.load_data(data, emb_root / bb, args.eval_test,
                               Path(args.test_emb_root) / bb if args.eval_test else None)
-            print(f"{bb}: loaded in {time.time() - t:.0f} s; {len(todo)} of {len(cells)} cells to run")
+            n_part = sum(partial(cell_dir(out, bb, *c), c[2]) for c in todo)
+            print(f"{bb}: loaded in {time.time() - t:.0f} s; {len(todo)} of {len(cells)} cells to "
+                  f"run ({n_part} partial: resumed)")
             heads = {}
             if any(c[3] == "zeroshot" for c in todo):
                 model = json.loads((emb_root / bb / "encoder.json").read_text())["model"]
@@ -433,11 +498,15 @@ def run(args: argparse.Namespace) -> pd.DataFrame:
             for c in todo:
                 d, t = cell_dir(out, bb, *c), time.time()
                 fz = frozen.get((bb, *c[:3], c[3] or ""))
-                res = g.run_cell(ctx, c[0], c[1], c[2], d, args, heads.get(c[3]),
-                                 *([fz] if fz else []))
+                prior = None if fz else load_prior(d, c[2])
+                old = read_row(d) if prior else None
+                res = g.run_cell(ctx, c[0], c[1], c[2], d, args, heads.get(c[3]), fz,
+                                 prior=prior)
                 res["seconds"] = round(time.time() - t, 1)
                 extra = ({"grid_edge": fz["grid_edge"], "dev_seen_top1_prereg": fz["dev_seen_top1"],
-                          "dev_unseen_top1_prereg": fz["dev_unseen_top1"]} if fz else {})
+                          "dev_unseen_top1_prereg": fz["dev_unseen_top1"]} if fz else
+                         {"prev_lr": old["lr"], "prev_dev_seen_top1": old["dev_seen_top1"]}
+                         if old else {})
                 write_text(d / "geo_metrics.json", json.dumps(res, indent=2, default=float))
                 write_text(d / "row.json", json.dumps(  # written last: the cell is done
                     {**cell_row(res, bb, *c, ctx["evals"]), **extra, "seconds": res["seconds"],
@@ -471,6 +540,8 @@ def run(args: argparse.Namespace) -> pd.DataFrame:
         print(gp.to_string())
         print(sh.to_string())
     print(edge_summary(table, args))
+    if not frozen:
+        print(lr_changes(table))
     return table
 
 

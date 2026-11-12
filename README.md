@@ -387,8 +387,15 @@ it, comparable across N), each with its actual accuracy: a zero-shot head can pr
 country absent from the training subset; top-1 on those images is a separate column. Outputs:
 `results.csv` (one row per cell), `gaps.csv` (paired StreetCLIP - L/14-336 differences on the
 same images), `scaling.png` and `gap.png`. Intervals are cluster bootstraps over sequences,
-and over creators for dev_unseen. The official test is read only with `--eval-test`, into a
-separate `<out>_test` directory. On Kaggle, attach the full run's output as input and run:
+and over creators for dev_unseen. The probe search is learning rate in {1e-3, 3e-3, 1e-2,
+3e-2, 1e-1} x epochs up to 60, a run stopped after 8 epochs without a dev_seen gain;
+`grid_edge` flags a choice at an edge of the search. The 1e-1 step was added after the
+previous grid's top edge was chosen often; it was run incrementally (stored runs of the
+other learning rates with the same settings reused, choice made over the merged sweep).
+Stopping rule: this is the final grid extension. If 1e-1 (or 1e-3) is chosen in some cells,
+the grid is frozen as it is and those cells are reported as a limitation; the `grid_edge`
+flags stay in `results.csv` and in the pre-registration. The official test is read only with
+`--eval-test`, into a separate `<out>_test` directory. On Kaggle, attach the full run's output as input and run:
 ```
 !git clone -b v2-phase0 https://github.com/Daggerabuse/geoguessr-ai.git /kaggle/working/geoguessr-ai && cd /kaggle/working/geoguessr-ai && pip install -q -e .
 !cd /kaggle/working/geoguessr-ai && bash scripts/kaggle_phase1_eval.sh
@@ -398,7 +405,8 @@ separate `<out>_test` directory. On Kaggle, attach the full run's output as inpu
 embedded, `python -m geoguessr_ai.prereg write --dev-out <dev phase1_eval dir>` writes
 `configs/phase1_final.json` and it is committed. It fixes the cells reported on test, their
 hyperparameters (the dev_seen-selected k, or learning rate and epoch, used as they are: no
-re-tuning on test), the head settings and the hypotheses. Primary: (H1) the paired StreetCLIP
+re-tuning on test, `grid_edge` kept per cell), the head settings, the search grid with its
+stopping rule (`search`) and the hypotheses. Primary: (H1) the paired StreetCLIP
 - L/14-336 test top-1 gap at N=50K is > 0, and (H2) the gap shrinks from 50K to 500K, each per
 variant x ordering: 12 hypotheses. Each gets a one-sided p-value from 10,000 paired
 cluster-bootstrap resamples on test (sequence clusters; the same resample applies to both
