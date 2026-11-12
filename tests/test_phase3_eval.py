@@ -1,6 +1,8 @@
 """Phase 3 coordinate runner on synthetic embeddings (no model, no Kaggle)."""
 
 import json
+import shutil
+import sys
 
 import numpy as np
 import pandas as pd
@@ -306,9 +308,11 @@ def test_cell_and_hybrid_grid(setup, monkeypatch):  # noqa: F811
     assert choice["target"] in (4, 8) and choice["backbones"] == list(pe.PAIR)
     assert set(probe_calls_n := {c[0] for c in probe_calls}) == {dev_seen_n}, probe_calls_n
     assert set(hybrid_sel) == {dev_seen_n}
-    # selection: PAIR x 2 targets x 2 inits x 2 lrs; main grid: 3 bb x 4 subsets x 2 inits x 2
-    # lrs minus the copied selection cells (PAIR x nat 90 x 2 inits x 2 lrs)
-    assert len(probe_calls) == 2 * 2 * 2 * 2 + 3 * 4 * 2 * 2 - 2 * 2 * 2
+    # selection: PAIR x 2 targets x the random init only x 2 lrs; main grid: 3 bb x 4 subsets x
+    # 2 inits x 2 lrs minus the copied selection cells (PAIR x nat 90 x random x 2 lrs)
+    assert len(probe_calls) == 2 * 2 * 2 + 3 * 4 * 2 * 2 - 2 * 2
+    assert not list((out / "cell_select").glob("*/*/*zeroshot*"))
+    assert choice["probe_init"] == "random"
     assert set(table["variant"]) == {"geo_cell_random", "geo_cell_zeroshot", "geo_hybrid_random",
                                      "geo_hybrid_zeroshot"}
     assert (table["cell_target"] == choice["target"]).all()
@@ -318,7 +322,7 @@ def test_cell_and_hybrid_grid(setup, monkeypatch):  # noqa: F811
     # zero-shot init: each cell's row = the text embedding of its majority country
     text = g.text_head("m/x", json.loads((tmp_path / "v2" / "classes.json").read_text()), "")
     heads = [c[2] for c in probe_calls]
-    assert len(majority) == (2 * 2 + 3 * 4 - 2)  # one per zero-shot cell probe (selection + grid)
+    assert len(majority) == 3 * 4  # one per zero-shot cell probe (the selection trains none)
     for maj in majority:
         assert sum(h.shape == text[maj].shape and np.allclose(h, text[maj]) for h in heads) >= 2
     for d in (out / "streetclip").glob("*_geo_hybrid_*"):  # masking: a kept neighbour is > 20 km away
@@ -327,3 +331,104 @@ def test_cell_and_hybrid_grid(setup, monkeypatch):  # noqa: F811
     calls = len(probe_calls)
     p3.run(p3_args(tmp_path, *args))  # everything cached: no probe trained again
     assert len(probe_calls) == calls
+
+
+# ------------------------------------------- Step 2: saved top cells, CPU-only hybrid, stop/resume
+
+CELL_ARGS = ["--cell-target", "4", "--probe-epochs", "2", "--probe-lrs", "0.1", "--mask-km", "20",
+             "--k", "1", "5"]
+
+
+def test_top_cells_file_holds_five_ids_and_their_probabilities(setup):  # noqa: F811
+    tmp_path, _ = setup
+    p3.run(p3_args(tmp_path, *CELL_ARGS, "--methods", "cell", "--backbones", "streetclip",
+                   "--orderings", "nat", "--sizes", "90", "--probe-inits", "random",
+                   "--cell-target", "8"))
+    d = tmp_path / "p3" / "streetclip" / "nat_90_geo_cell_random"
+    for split in ("dev_seen", "dev"):
+        t = pd.read_csv(d / f"{split}_top_cells.csv")
+        assert list(t.columns) == ["id", *[f"c{j}" for j in range(5)], *[f"p{j}" for j in range(5)]]
+        p = t[[f"p{j}" for j in range(5)]].to_numpy()
+        assert (p > 0).all() and (p <= 1 + 1e-9).all() and (np.diff(p, axis=1) <= 1e-12).all()
+        assert (p.sum(1) <= 1 + 1e-9).all()
+
+
+def test_top_cell_probs_are_the_softmax():
+    z = np.array([[0.0, 1.0, 2.0, 3.0], [5.0, 5.0, 0.0, 0.0]])
+    top = p3.top_cells(z, 2)
+    ref = np.exp(z) / np.exp(z).sum(1, keepdims=True)
+    assert np.allclose(p3.top_cell_probs(z, top), np.take_along_axis(ref, top, 1))
+
+
+def test_hybrid_runs_without_cuda_from_saved_top_cells(setup, monkeypatch):  # noqa: F811
+    tmp_path, _ = setup
+    base = ["--backbones", "streetclip", "--orderings", "nat", "--sizes", "90", *CELL_ARGS]
+    p3.run(p3_args(tmp_path, *base, "--methods", "cell", "hybrid"))
+    out = tmp_path / "p3"
+    hyb = out / "streetclip" / "nat_90_geo_hybrid_random"
+    first = json.loads((hyb / "row.json").read_text())
+    for d in out.glob("*/*_geo_hybrid_*"):
+        shutil.rmtree(d)
+
+    def no_probe(*a, **k):
+        raise AssertionError("the hybrid must not train a probe")
+
+    import torch
+    monkeypatch.setattr(g, "probe_logits", no_probe)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    table = p3.run(p3_args(tmp_path, *base, "--methods", "hybrid", "--device", ""))
+    again = json.loads((hyb / "row.json").read_text())
+    assert set(table["variant"]) == {"geo_cell_random", "geo_cell_zeroshot", "geo_hybrid_random",
+                                     "geo_hybrid_zeroshot"}
+    assert again["knn_device"] == "cpu" and again["cache_key"] == first["cache_key"]
+    assert again["dev_seen_geoscore"] == first["dev_seen_geoscore"]  # same top cells, same kNN
+
+
+def test_hybrid_key_follows_its_probe_source_and_hybrid_alone_needs_cells(setup, monkeypatch):  # noqa: F811
+    tmp_path, _ = setup
+    base = ["--backbones", "streetclip", "--orderings", "nat", "--sizes", "90", *CELL_ARGS,
+            "--probe-inits", "random"]
+    with pytest.raises(SystemExit, match="needs finished cell probes"):
+        p3.run(p3_args(tmp_path, *base, "--methods", "hybrid"))
+    p3.run(p3_args(tmp_path, *base, "--methods", "cell", "hybrid"))
+    calls = []
+    real = p3.run_hybrid
+    monkeypatch.setattr(p3, "run_hybrid", lambda *a, **k: calls.append(a[2]) or real(*a, **k))
+    p3.run(p3_args(tmp_path, *base, "--methods", "hybrid"))
+    assert calls == []  # cached: same probe source
+    f = tmp_path / "p3" / "streetclip" / "nat_90_geo_cell_random" / "dev_seen_top_cells.csv"
+    t = pd.read_csv(f)
+    t["c0"] = (t["c0"] + 1) % 4  # a different probe output
+    t.to_csv(f, index=False)
+    p3.run(p3_args(tmp_path, *base, "--methods", "hybrid"))
+    assert calls == [90]  # only that hybrid cell is redone, no cell probe is trained
+
+
+def test_stop_file_finishes_the_cell_then_asks_to_resume(setup, monkeypatch, capsys):  # noqa: F811
+    tmp_path, _ = setup
+    stop, ran = tmp_path / "STOP", []
+    real = p3.run_cells
+
+    def spy(ctx, o, n, *a, **k):
+        if not ran:
+            stop.touch()  # the deadline passes while the first cell runs
+        ran.append((o, n))
+        return real(ctx, o, n, *a, **k)
+
+    monkeypatch.setattr(p3, "run_cells", spy)
+    args = ["--backbones", "streetclip", "--probe-inits", "random", "--methods", "cell",
+            *CELL_ARGS, "--stop-file", str(stop)]
+    with pytest.raises(p3.StopRequested, match="3 cell run"):
+        p3.run(p3_args(tmp_path, *args))
+    done = sorted(p.parent.name for p in (tmp_path / "p3" / "streetclip").glob("*/row.json"))
+    assert len(ran) == 1 and len(done) == 1  # the cell in hand was finished and saved
+    stop.unlink()
+    p3.run(p3_args(tmp_path, *args))
+    assert len(ran) == 4 and len(set(ran)) == 4  # the other three ran; the first did not rerun
+    stop.touch()
+    fresh = p3_args(tmp_path, *args, "--out", str(tmp_path / "q"))  # before parse_args is patched
+    monkeypatch.setattr(p3, "parse_args", lambda: fresh)
+    monkeypatch.setattr(sys, "argv", ["phase3_eval"])
+    with pytest.raises(SystemExit) as e:
+        p3.main()
+    assert e.value.code == 3 and "RESUME NEEDED" in capsys.readouterr().out

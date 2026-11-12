@@ -33,13 +33,19 @@ Step 2, geocells (--methods cell hybrid; geocells.py: a quadtree from the pool c
   geo_hybrid_<init>  the probe's top-m cells (m in HYBRID_M) x the masked global kNN top-K
                      (--hybrid-k): the --hybrid-predictor (medoid/mean, k and tau as above) over
                      the kept neighbours, else the top cell's centroid; m, k, tau on dev_seen.
-The cell count is chosen once (cell_geo): the cell probe of the PAIR backbones at nat and the
-largest N for every --cell-targets count; the count with the best average dev_seen GeoScore of
-the pair is recorded in cell_count.json and frozen for every backbone, ordering and N.
+The cell count is chosen once (cell_geo), with the RANDOM init only: the cell probe of the PAIR
+backbones at nat and the largest N for every --cell-targets count; the count with the best
+average dev_seen GeoScore of the pair is recorded in cell_count.json and frozen for both inits,
+every backbone, ordering and N. The cell probe saves, per cell and split (dev_seen, dev), its
+top-5 cell ids and probabilities ({split}_top_cells.csv); --methods hybrid reads only those
+(no probe, no GPU: run it with --device '' for the CPU fp32 kNN of Step 1) and refuses if a
+cell is missing. --stop-file: once that file exists no new cell is started (the current one
+finishes), the run prints RESUME NEEDED and exits 3; finished cells are cached.
 kNN numerics are pinned (--device, --knn-dtype; both recorded in every row.json): the selection
 here and any later test run must use the same setting. A finished cell is reused only if its
 cache_key (cache_settings: data config hash, embedding cache identity, grids, mask, numerics,
-seed, n_boot, Phase 1 probe source) is unchanged. Metrics follow OSV-5M (haversine km, GeoScore = 5000 * exp(-km / 1492.7), accuracy within
+seed, n_boot, Phase 1 probe source; the hybrid: its cell's key and the hash of the cell's
+top-cells files, i.e. its probe source) is unchanged. Metrics follow OSV-5M (haversine km, GeoScore = 5000 * exp(-km / 1492.7), accuracy within
 1/25/200/750/2500 km); country_top1 is the country of the training image nearest to the predicted
 point, a sanity check against Phase 1. Paired StreetCLIP - L/14-336 differences per image
 (gaps_<metric>.csv, shrink_<metric>.csv; for km a lower value is better) and of median km
@@ -255,6 +261,29 @@ def baselines(ctx, ordering: str, n: int, sub: pd.DataFrame, nbrs, geo, args) ->
 # ----------------------------------------------------------------- Step 2: geocells
 
 
+class StopRequested(Exception):
+    """The --stop-file exists: no new cell is started."""
+
+
+SPLITS = ("dev_seen", "dev")  # the development splits phase3_eval scores (never test)
+
+
+def probe_source(out: Path, bb: str, ordering: str, n: int, init: str) -> dict | None:
+    """What a hybrid cell is built from: the cell probe's cache key and the hash of its saved
+    top-cells files; None while the cell is missing."""
+    d = pe.cell_dir(out, bb, ordering, n, METHOD, f"cell_{init}")
+    row, files = pe.read_row(d), [d / f"{s}_top_cells.csv" for s in SPLITS]
+    if row is None or not all(f.exists() for f in files):
+        return None
+    return {"cell_cache_key": row.get("cache_key"),
+            "top_cells_sha256": [prereg.sha256(f) for f in files]}
+
+
+def hybrid_key(settings: dict, out: Path, bb: str, ordering: str, n: int, init: str) -> str | None:
+    src = probe_source(out, bb, ordering, n, init)
+    return None if src is None else cache_key({**settings, "probe_source": src})
+
+
 def make_geo(data: Path, out: Path, target: int) -> dict:
     """The geocell partition for target cells, from the pool coordinates (train.csv) only."""
     pool = pd.read_csv(data / "train.csv", usecols=["latitude", "longitude"])
@@ -289,6 +318,17 @@ def top_cells(logits: np.ndarray, m: int) -> np.ndarray:
     return np.take_along_axis(part, order, 1)
 
 
+def top_cell_probs(logits: np.ndarray, top: np.ndarray, chunk: int = 4096) -> np.ndarray:
+    """Softmax probability of the cells `top` (N, m) under logits (N, cells)."""
+    out = np.empty(top.shape, dtype=np.float64)
+    for a in range(0, len(logits), chunk):
+        z = logits[a : a + chunk].astype(np.float64)
+        mx = z.max(1, keepdims=True)
+        lse = mx[:, 0] + np.log(np.exp(z - mx).sum(1))
+        out[a : a + chunk] = np.exp(np.take_along_axis(z, top[a : a + chunk], 1) - lse[:, None])
+    return out
+
+
 def split_groups(ctx: dict, sub: pd.DataFrame) -> dict:
     creators = set(sub["creator_id"])
     return {s: g.row_groups(ctx["dfs"][s], ctx["counts"],
@@ -296,10 +336,12 @@ def split_groups(ctx: dict, sub: pd.DataFrame) -> dict:
             for s in ctx["evals"]}
 
 
-def run_cells(ctx: dict, ordering: str, n: int, args, geo: dict, text) -> dict[str, dict]:
+def run_cells(ctx: dict, ordering: str, n: int, args, geo: dict, text,
+              inits=None) -> dict[str, dict]:
     """Linear probe over geocell ids per init (train.py's probe: epoch by cell top-1 on
     dev_seen; lr by mean GeoScore on dev_seen of the argmax cell's centroid). Writes each
-    split's top cells ({split}_top_cells.csv) for the hybrid."""
+    split's top-5 cells and their probabilities ({split}_top_cells.csv) for the hybrid. inits:
+    the inits still to run (default: args.probe_inits)."""
     import torch
 
     dfs, embs, evals, sel = ctx["dfs"], ctx["embs"], ctx["evals"], ctx["dfs"]["dev_seen"]
@@ -312,16 +354,17 @@ def run_cells(ctx: dict, ordering: str, n: int, args, geo: dict, text) -> dict[s
     q = {s: gc.assign(geo["tree"], dfs[s]["latitude"], dfs[s]["longitude"]) for s in evals}
     cent_lab = g.nearest_label(cent[:, 0], cent[:, 1], lat, lon, lab)
     groups, out = split_groups(ctx, sub), {}
-    for init in args.probe_inits:
+    for init in inits or args.probe_inits:
         head = (pe.random_head(n_cells, db.shape[1], args.seed) if init == "random" else
                 text[torch.from_numpy(majority_country(y, lab, n_cells, cent, lat, lon))])
-        sweep, best, best_top = [], None, None
+        sweep, best, best_top, best_prob = [], None, None, None
         for lr in args.probe_lrs:
             a = argparse.Namespace(**{**vars(args), "probe_lr": lr})
             logits, hist = g.probe_logits(db, y, embs["dev_seen"], q["dev_seen"],
                                           {s: embs[s] for s in evals}, head, a,
                                           args.device or "cpu")
             top = {s: top_cells(logits[s], max(HYBRID_M)) for s in evals}
+            prob = {s: top_cell_probs(logits[s], top[s]) for s in evals}
             del logits
             e = max(hist, key=lambda h: h["val_top1"])
             km = g.haversine(sel["latitude"].to_numpy(), sel["longitude"].to_numpy(),
@@ -330,7 +373,7 @@ def run_cells(ctx: dict, ordering: str, n: int, args, geo: dict, text) -> dict[s
                           "dev_seen_geoscore": float(g.geoscore(km).mean()),
                           "stopped_early": hist[-1]["epoch"] < args.probe_epochs})
             if best is None or sweep[-1]["dev_seen_geoscore"] > best["dev_seen_geoscore"]:
-                best, best_top = sweep[-1], top
+                best, best_top, best_prob = sweep[-1], top, prob
             print(f"  cell_{init} lr {lr:g}: epoch {e['epoch']}, dev_seen GeoScore "
                   f"{sweep[-1]['dev_seen_geoscore']:.1f}", flush=True)
         pred = f"cell_{init}"
@@ -341,7 +384,8 @@ def run_cells(ctx: dict, ordering: str, n: int, args, geo: dict, text) -> dict[s
         for s in evals:
             t = best_top[s]
             d.mkdir(parents=True, exist_ok=True)
-            pd.DataFrame({"id": dfs[s]["id"], **{f"c{j}": t[:, j] for j in range(t.shape[1])}}) \
+            pd.DataFrame({"id": dfs[s]["id"], **{f"c{j}": t[:, j] for j in range(t.shape[1])},
+                          **{f"p{j}": best_prob[s][:, j] for j in range(t.shape[1])}}) \
                 .to_csv(d / f"{s}_top_cells.csv", index=False)
             res[s] = score_coords(d, s, dfs[s], tuple(cent[t[:, 0]].T), cent_lab[t[:, 0]],
                                   groups[s], args, g.clusters_of(s, dfs[s]))
@@ -382,8 +426,10 @@ def choose_hybrid(nb, db_cells, top, sel: pd.DataFrame, lat, lon, cent, args):
     return {"m": best["m"], "k": best["k"], "tau": best["tau"]}, sweep
 
 
-def run_hybrid(ctx: dict, ordering: str, n: int, args, geo: dict) -> dict[str, dict]:
-    """Probe top-m cells (from the finished cell_<init> cells) x masked global kNN top-K."""
+def run_hybrid(ctx: dict, ordering: str, n: int, args, geo: dict,
+               inits=None) -> dict[str, dict]:
+    """Probe top-m cells (read from the finished cell_<init> cells' saved top-5; nothing is
+    trained, no GPU needed) x masked global kNN top-K."""
     dfs, embs, evals = ctx["dfs"], ctx["embs"], ctx["evals"]
     mask = (dfs["train"][f"{ordering}_rank"] < n).to_numpy()
     sub, db = dfs["train"][mask], embs["train"][mask]
@@ -397,12 +443,12 @@ def run_hybrid(ctx: dict, ordering: str, n: int, args, geo: dict) -> dict[str, d
                    "masked_any_share": len(np.unique(gm[s][0])) / max(len(dfs[s]), 1)}
                for s in evals}
     groups, out = split_groups(ctx, sub), {}
-    for init in args.probe_inits:
+    for init in inits or args.probe_inits:
         cd = pe.cell_dir(Path(args.out), ctx["backbone"], ordering, n, METHOD, f"cell_{init}")
         top = {}
         for s in evals:
             t = pd.read_csv(cd / f"{s}_top_cells.csv", dtype={"id": str}).set_index("id")
-            top[s] = t.loc[dfs[s]["id"]].to_numpy()
+            top[s] = t.loc[dfs[s]["id"]].filter(regex=r"^c\d+$").to_numpy()  # ids only, not the p<j>
         best, sweep = choose_hybrid(nb["dev_seen"], db_cells, top["dev_seen"], dfs["dev_seen"],
                                     lat, lon, cent, args)
         pred = f"hybrid_{init}"
@@ -422,7 +468,8 @@ def run_hybrid(ctx: dict, ordering: str, n: int, args, geo: dict) -> dict[str, d
 
 def pick_cell_target(rows: pd.DataFrame) -> tuple[int, dict]:
     """The geocell target with the best average dev_seen GeoScore over the PAIR backbones'
-    rows (every init), ties -> the smaller target; also the averages per target."""
+    rows (the selection runs the random init only), ties -> the smaller target; also the
+    averages per target."""
     r = rows[rows["backbone"].isin(pe.PAIR)]
     avg = r.groupby("cell_target")["dev_seen_geoscore"].mean().sort_index()
     return int(avg.idxmax()), {int(k): float(v) for k, v in avg.items()}
@@ -571,22 +618,43 @@ def method_preds(args) -> dict[str, tuple]:
 
 def run_grid(args: argparse.Namespace, geo: dict | None) -> pd.DataFrame:
     """Every backbone x subset x method of args (finished cells with the same cache key are
-    reused); returns the rows."""
+    reused; a cell probe of an init that is done is never retrained, a hybrid cell is redone
+    when its probe source changed); returns the rows. --stop-file: StopRequested before the
+    next cell once that file exists."""
     out, data, emb_root = Path(args.out), Path(args.data), Path(args.emb_root)
     preds, rows = method_preds(args), []
     cells = (geo["sha"], geo["target"]) if geo else None
+    stop = Path(args.stop_file) if args.stop_file else None
     for bb in args.backbones:
         settings = {m: cache_settings(args, data, emb_root / bb, m, cells) for m in preds}
-        keys = {m: cache_key(s) for m, s in settings.items()}
+        keys = {m: cache_key(s) for m, s in settings.items() if m != "hybrid"}
         subsets = [(o, n) for o in args.orderings for n in args.sizes]
-        todo = {}
+
+        def pending(m, c, init, bb=bb, settings=settings, keys=keys):
+            d = pe.cell_dir(out, bb, *c, METHOD, f"{m}_{init}")
+            key = hybrid_key(settings[m], out, bb, *c, init) if m == "hybrid" else keys[m]
+            return key is None or not cell_done(d, key)
+
+        todo, missing = {}, []
         for c in subsets:
-            ms = [m for m in preds if not all(cell_done(pe.cell_dir(out, bb, *c, METHOD, p),
-                                                        keys[m]) for p in preds[m])]
-            if "cell" in ms and "hybrid" in preds and "hybrid" not in ms:
-                ms.append("hybrid")  # new cell probes: their hybrid is redone too
+            ms = {}
+            if "knn" in preds and not all(cell_done(pe.cell_dir(out, bb, *c, METHOD, p), keys["knn"])
+                                          for p in preds["knn"]):
+                ms["knn"] = None
+            cell_inits = [i for i in args.probe_inits if "cell" in preds and pending("cell", c, i)]
+            if cell_inits and "cell" in args.methods:
+                ms["cell"] = cell_inits
+            elif cell_inits:  # hybrid only: its cell probes must exist already
+                missing += [f"{bb} {c[0]} {c[1]} {i}" for i in cell_inits]
+            hyb = [i for i in args.probe_inits if "hybrid" in preds
+                   and (i in cell_inits or pending("hybrid", c, i))]
+            if hyb:
+                ms["hybrid"] = hyb
             if ms:
                 todo[c] = ms
+        if missing:
+            raise SystemExit(f"--methods hybrid needs finished cell probes ({len(missing)} missing, "
+                             f"e.g. {', '.join(missing[:3])}): run --methods cell first")
         if todo:
             t = time.time()
             ctx = {**g.load_data(data, emb_root / bb, eval_test=False), "backbone": bb}
@@ -596,35 +664,40 @@ def run_grid(args: argparse.Namespace, geo: dict | None) -> pd.DataFrame:
             if geo:
                 tr = ctx["dfs"]["train"]
                 ctx["pool_cells"] = gc.assign(geo["tree"], tr["latitude"], tr["longitude"])
-                if "zeroshot" in args.probe_inits and any("cell" in ms for ms in todo.values()):
+                if any("zeroshot" in (ms.get("cell") or ()) for ms in todo.values()):
                     model = json.loads((emb_root / bb / "encoder.json").read_text())["model"]
                     text = g.text_head(model, ctx["classes"], args.template)
             print(f"{bb}: loaded in {time.time() - t:.0f} s; {len(todo)} of {len(subsets)} "
                   f"subsets to run", flush=True)
-            for i, ((o, n), ms) in enumerate(todo.items(), 1):
-                for m in ms:
-                    print(f"{bb} {o} {n} {m}: start ({i}/{len(todo)})", flush=True)
-                    t = time.time()
-                    res_all = (run_subset(ctx, o, n, args) if m == "knn" else
-                               run_cells(ctx, o, n, args, geo, text) if m == "cell" else
-                               run_hybrid(ctx, o, n, args, geo))
-                    for pred, res in res_all.items():
-                        d = pe.cell_dir(out, bb, o, n, METHOD, pred)
-                        res["seconds"] = round(time.time() - t, 1)
-                        write_text(d / "geo_metrics.json", json.dumps(
-                            {**res, "cache_settings": settings[m]}, indent=2, default=float))
-                        write_text(d / "row.json", json.dumps(  # written last: the cell is done
-                            {**cell_row(res, bb, o, n, pred, ctx["evals"]), "method": m,
-                             "seconds": res["seconds"], "cache_version": CACHE_VERSION,
-                             "cache_key": keys[m], "mask_km": args.mask_km,
-                             "knn_device": settings[m]["knn_device"],
-                             "knn_dtype": args.knn_dtype}, default=float))
-                    masked = next(iter(res_all.values())).get("masking") or {}
-                    print(f"{bb} {o} {n} {m}: {time.time() - t:.0f} s"
-                          + ("; masked per query: " + ", ".join(
-                              f"{pe.SPLIT_NAMES[s]} {v['masked_mean']:.2f} "
-                              f"({100 * v['masked_any_share']:.1f}% of queries)"
-                              for s, v in masked.items()) if masked else ""), flush=True)
+            units = [(c, m, inits) for c, ms in todo.items() for m, inits in ms.items()]
+            for j, ((o, n), m, inits) in enumerate(units):
+                if stop and stop.exists():
+                    raise StopRequested(f"stopped before {bb} {o} {n} {m}; {len(units) - j} cell "
+                                        f"run(s) left for {bb} (later backbones not counted)")
+                print(f"{bb} {o} {n} {m}: start ({j + 1}/{len(units)})", flush=True)
+                t = time.time()
+                res_all = (run_subset(ctx, o, n, args) if m == "knn" else
+                           run_cells(ctx, o, n, args, geo, text, inits) if m == "cell" else
+                           run_hybrid(ctx, o, n, args, geo, inits))
+                for pred, res in res_all.items():
+                    d = pe.cell_dir(out, bb, o, n, METHOD, pred)
+                    key = (hybrid_key(settings[m], out, bb, o, n, pred.removeprefix("hybrid_"))
+                           if m == "hybrid" else keys[m])
+                    res["seconds"] = round(time.time() - t, 1)
+                    write_text(d / "geo_metrics.json", json.dumps(
+                        {**res, "cache_settings": settings[m]}, indent=2, default=float))
+                    write_text(d / "row.json", json.dumps(  # written last: the cell is done
+                        {**cell_row(res, bb, o, n, pred, ctx["evals"]), "method": m,
+                         "seconds": res["seconds"], "cache_version": CACHE_VERSION,
+                         "cache_key": key, "mask_km": args.mask_km,
+                         "knn_device": settings[m]["knn_device"],
+                         "knn_dtype": args.knn_dtype}, default=float))
+                masked = next(iter(res_all.values())).get("masking") or {}
+                print(f"{bb} {o} {n} {m}: {time.time() - t:.0f} s"
+                      + ("; masked per query: " + ", ".join(
+                          f"{pe.SPLIT_NAMES[s]} {v['masked_mean']:.2f} "
+                          f"({100 * v['masked_any_share']:.1f}% of queries)"
+                          for s, v in masked.items()) if masked else ""), flush=True)
             del ctx
         rows += [pe.read_row(pe.cell_dir(out, bb, *c, METHOD, p))
                  for c in subsets for m in preds for p in preds[m]]
@@ -633,28 +706,32 @@ def run_grid(args: argparse.Namespace, geo: dict | None) -> pd.DataFrame:
 
 def cell_geo(args: argparse.Namespace) -> dict:
     """The frozen geocell partition: --cell-target, else the recorded choice (cell_count.json),
-    else chosen now, once: the cell probe for the PAIR backbones at nat and the largest N for
-    every CELL_TARGETS count, then the count with the best average dev_seen GeoScore of the
-    pair (pick_cell_target). Its cells are copied into the main grid."""
+    else chosen now, once: the cell probe (random init only) for the PAIR backbones at nat and
+    the largest N for every CELL_TARGETS count, then the count with the best average dev_seen
+    GeoScore of the pair (pick_cell_target), frozen for both inits. Its cells are copied into
+    the main grid."""
     out, data = Path(args.out), Path(args.data)
     if args.cell_target:
         return make_geo(data, out, args.cell_target)
     f = out / "cell_count.json"
     if f.exists():
         return make_geo(data, out, json.loads(f.read_text())["target"])
+    if "cell" not in args.methods:
+        raise SystemExit(f"--methods hybrid needs {f} (or --cell-target): run --methods cell first")
     n, rows, geos = max(args.sizes), [], {}
     for t in args.cell_targets:
         geos[t] = make_geo(data, out, t)
         a = argparse.Namespace(**{**vars(args), "out": str(out / "cell_select" / f"c{t}"),
                                   "backbones": list(pe.PAIR), "orderings": ["nat"],
-                                  "sizes": [n], "methods": ["cell"]})
+                                  "sizes": [n], "methods": ["cell"],
+                                  "probe_inits": ["random"]})
         print(f"cell count selection: target {t} (nat {n}, {', '.join(pe.PAIR)})", flush=True)
         rows.append(run_grid(a, geos[t]))
     target, avg = pick_cell_target(pd.concat(rows))
     write_text(f, json.dumps({"target": target, "n_cells": len(geos[target]["cent"]),
                               "geocells_sha256": geos[target]["sha"],
                               "dev_seen_geoscore_pair_average": avg, "ordering": "nat", "n": n,
-                              "backbones": list(pe.PAIR)}, indent=2))
+                              "backbones": list(pe.PAIR), "probe_init": "random"}, indent=2))
     print(f"cell count selection: {avg} -> target {target}, frozen", flush=True)
     src = out / "cell_select" / f"c{target}"
     for p in src.glob("*/*"):  # same cache key: the main grid reuses these cells
@@ -730,6 +807,8 @@ def parse_args(argv=None) -> argparse.Namespace:
                     help="geocell counts tried once to choose the frozen one")
     ap.add_argument("--cell-target", type=int,
                     help="use this geocell count (skips the selection and cell_count.json)")
+    ap.add_argument("--stop-file", help="once this file exists no new cell is started (the "
+                    "current one finishes): RESUME NEEDED, exit 3; finished cells stay cached")
     ap.add_argument("--hybrid-k", type=int, default=1000, help="global kNN top-K of the hybrid")
     ap.add_argument("--hybrid-predictor", choices=["medoid", "mean"], default="medoid",
                     help="medoid: geo_mean degenerated to top-1 (k=1) on dev")
@@ -738,7 +817,12 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8")
-    run(parse_args())
+    try:
+        run(parse_args())
+    except StopRequested as e:
+        print(f"RESUME NEEDED: {e}. Rerun with the same settings; finished cells are skipped.",
+              flush=True)
+        sys.exit(3)
 
 
 if __name__ == "__main__":

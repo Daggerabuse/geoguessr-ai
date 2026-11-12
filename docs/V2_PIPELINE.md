@@ -216,8 +216,8 @@ The difference mixes the mask with the device/dtype change and is not a clean le
 hybrid's default predictor is `medoid` (`--hybrid-predictor`, chosen after seeing this dev result;
 `mean` stays selectable).
 
-Step 2, geocells (`METHODS=cell,hybrid bash scripts/kaggle_phase3.sh`, GPU session with
-internet on). `geocells.py` builds one quadtree on (lat, lon) from the coordinates of the full
+Step 2, geocells (`METHODS=cell` in a GPU session with internet on, `METHODS=hybrid` in a CPU
+session). `geocells.py` builds one quadtree on (lat, lon) from the coordinates of the full
 training pool (no labels, no images): a box splits into 4 while it holds more than
 `max_per_cell` points and is larger than 0.01 degrees; `max_per_cell` is set by bisection to hit
 the target count; a cell's centroid is the normalised 3D mean of its pool points (or its pool
@@ -226,12 +226,33 @@ sha256 enters the cache key. One partition serves every N (the same classes alon
 curve), so it uses the pool's geographic density beyond a subset. `--methods cell` trains the
 Phase 1 probe (lr grid 1e-3..1e-1, 60 epochs, patience 8) over cell ids, random or zero-shot
 initialised (each cell: the text embedding of its majority country in the subset); the epoch is
-chosen by cell top-1 and the lr by GeoScore, both on dev_seen. `--methods hybrid` keeps the
-masked global kNN top-1000 inside the probe's top-m cells (m in {1, 3, 5}, chosen on dev_seen)
-and applies `--hybrid-predictor` (medoid by default), else the top cell's centroid. The cell
-count is chosen once: 1K/2K/5K cells for StreetCLIP and L/14-336 at nat 500K, the best average
-dev_seen GeoScore of the pair, recorded in `cell_count.json` and frozen for every backbone,
-ordering and N.
+chosen by cell top-1 and the lr by GeoScore, both on dev_seen. Per cell and split (dev_seen,
+dev_unseen) it saves the top-5 cell ids and their probabilities (`<split>_top_cells.csv`).
+`--methods hybrid` reads only those files (no probe is trained, no GPU is needed; it refuses if a
+cell probe is missing): it keeps the masked global kNN top-1000 inside the probe's top-m cells (m
+in {1, 3, 5}, chosen on dev_seen) and applies `--hybrid-predictor`, else the top cell's centroid.
+The hybrid's cache key includes its probe source (the cell's key and the hash of its top-cells
+files), so a changed probe reruns exactly its hybrid cells.
+
+Decisions made before any Step 2 result (changes to the first Step 2 design):
+- **Cell-count selection uses the random init only.** 1K/2K/5K cells for StreetCLIP and L/14-336
+  at nat 500K; the count with the best average dev_seen GeoScore of the pair, recorded in
+  `cell_count.json` and frozen for both inits, every backbone, ordering and N. (Before: the
+  average over both inits.) Rationale: random init only fits the weekly GPU budget (selection
+  with both inits ≈ 2.6 h vs ≈ 1.3 h). It stays neutral between the compared backbones (average
+  of StreetCLIP and L/14-336); the zero-shot variant uses the frozen count chosen this way.
+- **The hybrid runs in a CPU-only session.** Cell probes (GPU) and hybrid (CPU) are separate
+  runs: the hybrid's kNN is the Step 1 setting (numpy fp32, `--device ''`), so Step 1 and the
+  hybrid share one numerical pin. (Before: kNN on cuda in the same GPU session.)
+- Not changed: `--hybrid-predictor` defaults to `medoid` (`geo_mean` degenerated to top-1 on
+  dev, see above).
+
+Sessions (`kaggle_phase3.sh`; env: `METHODS`, `BACKBONES`, `ORDERINGS`, `SIZES`, `PROBE_INITS`,
+`DEADLINE_MIN`, `SEED_FROM`). At `DEADLINE_MIN` a STOP marker lets the cell in hand finish, then
+the run prints RESUME NEEDED and exits 3 (hard kill GRACE_MIN, default 30, later; that cell is
+lost). Finished cells are cached; `SEED_FROM=<earlier output dir>` copies it into the empty
+output of a fresh session (refused if it is not a phase3_eval output, the output dir itself, or
+the output is not empty). A cell probe of an init that is done is never retrained.
 
 Exploratory Phase 1 check in the same session: with the test embedding run (`emb_test`) and the
 Phase 1 dev output attached, `kaggle_phase3.sh` ends with `scripts/analysis/phase1_posthoc.py`,

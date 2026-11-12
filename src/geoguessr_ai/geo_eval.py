@@ -206,7 +206,7 @@ def knn_mean_coords(sims, idx, db_lat, db_lon, k: int, tau: float | None = None,
     w = s if tau is None else np.exp((s - s[:, :1]) / tau)
     if valid is not None:  # invalid neighbours get weight 0 (see knn_coordinates)
         w = w * valid[:, :k]
-    v =(w[:, :, None] * to_xyz(db_lat[idx[:, :k]], db_lon[idx[:, :k]])).sum(axis=1)
+    v = (w[:, :, None] * to_xyz(db_lat[idx[:, :k]], db_lon[idx[:, :k]])).sum(axis=1)
     lat, lon = from_xyz(v)
     bad = np.linalg.norm(v, axis=1) < 1e-6 * np.abs(w).sum(axis=1)
     lat[bad], lon[bad] = db_lat[idx[bad, 0]], db_lon[idx[bad, 0]]
