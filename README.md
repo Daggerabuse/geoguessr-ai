@@ -417,7 +417,8 @@ uncorrected 95% percentile interval is reported with each. Everything else is ex
 `bash scripts/kaggle_phase1.sh test` embeds the 5 test zips into `emb_test/`; it refuses to
 start unless the pre-registration is committed and unmodified, and records its hash, commit
 and the start time. Finally `phase1_eval --eval-test --prereg configs/phase1_final.json
---test-emb-root <emb_test>` retrains each declared cell once with its frozen hyperparameters,
+--test-emb-root <emb_test>` (on Kaggle: `bash scripts/kaggle_phase1_final.sh`, which finds
+both attached inputs) retrains each declared cell once with its frozen hyperparameters,
 scores test into `<out>_test`, prints the primary results first (`primary.csv`) and labels
 every other output exploratory.
 
