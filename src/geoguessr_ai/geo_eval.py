@@ -160,15 +160,22 @@ def knn_country_scores(sims, idx, db_labels, n_classes: int, k: int) -> np.ndarr
     return scores
 
 
-def knn_coordinates(sims, idx, db_lat, db_lon, k: int, chunk: int = 2048):
+def knn_coordinates(sims, idx, db_lat, db_lon, k: int, chunk: int = 2048, valid=None):
     """Geographic medoid of the k neighbours: the neighbour with the smallest similarity-
-    weighted sum of distances to the others (robust to a few far-away matches)."""
+    weighted sum of distances to the others (robust to a few far-away matches).
+    valid: optional (N, >=k) bool; invalid neighbours neither weigh nor can be the medoid
+    (each row needs a valid first column)."""
     lat, lon = db_lat[idx[:, :k]], db_lon[idx[:, :k]]
     best = np.zeros(len(idx), dtype=int)
     for s in range(0, len(idx), chunk):
         la, lo, w = lat[s : s + chunk], lon[s : s + chunk], sims[s : s + chunk, :k]
         d = haversine(la[:, :, None], lo[:, :, None], la[:, None, :], lo[:, None, :])
-        best[s : s + chunk] = np.argmin((d * w[:, None, :]).sum(-1), axis=1)
+        if valid is None:
+            best[s : s + chunk] = np.argmin((d * w[:, None, :]).sum(-1), axis=1)
+            continue
+        v = valid[s : s + chunk, :k]
+        cost = (d * (w * v)[:, None, :]).sum(-1)
+        best[s : s + chunk] = np.argmin(np.where(v, cost, np.inf), axis=1)
     r = np.arange(len(idx))
     return lat[r, best], lon[r, best]
 
@@ -190,14 +197,16 @@ def knn_top1_coords(idx, db_lat, db_lon):
     return db_lat[idx[:, 0]], db_lon[idx[:, 0]]
 
 
-def knn_mean_coords(sims, idx, db_lat, db_lon, k: int, tau: float | None = None):
+def knn_mean_coords(sims, idx, db_lat, db_lon, k: int, tau: float | None = None, valid=None):
     """Weighted mean of the k neighbours on the sphere: the mean of their 3D unit vectors,
     projected back (no lat/lon averaging, so it is correct across the antimeridian and near the
     poles). Weights: the cosine similarity (tau None) or exp((sim - best sim) / tau). Where the
     mean vector nearly vanishes (neighbours spread around the globe) the nearest neighbour is used."""
     s = sims[:, :k].astype(np.float64)
     w = s if tau is None else np.exp((s - s[:, :1]) / tau)
-    v = (w[:, :, None] * to_xyz(db_lat[idx[:, :k]], db_lon[idx[:, :k]])).sum(axis=1)
+    if valid is not None:  # invalid neighbours get weight 0 (see knn_coordinates)
+        w = w * valid[:, :k]
+    v =(w[:, :, None] * to_xyz(db_lat[idx[:, :k]], db_lon[idx[:, :k]])).sum(axis=1)
     lat, lon = from_xyz(v)
     bad = np.linalg.norm(v, axis=1) < 1e-6 * np.abs(w).sum(axis=1)
     lat[bad], lon[bad] = db_lat[idx[bad, 0]], db_lon[idx[bad, 0]]

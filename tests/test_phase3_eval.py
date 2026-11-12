@@ -242,3 +242,88 @@ def test_baselines(setup):  # noqa: F811
     assert not set(gp["variant"]) & {"geo_constant", "geo_oracle"}
     assert {"geo_centroid", "geo_bestk"} <= set(gp["variant"])
     assert table[table["predictor"] == "oracle"]["k"].isna().all()
+
+
+# ----------------------------------------------------------------- Step 2: geocells
+
+
+def test_majority_country_ties_and_empty_cells():
+    cells, labels = np.array([0, 0, 1, 1, 1]), np.array([3, 2, 1, 1, 0])
+    cent = np.array([[0.0, 0.0], [0.0, 0.0], [-40.0, 100.0]])
+    lat, lon = np.array([0, 0, 0, 0, -41.0]), np.array([0, 0, 0, 0, 101.0])
+    assert p3.majority_country(cells, labels, 3, cent, lat, lon).tolist() == [2, 1, 0]
+
+
+def test_pick_cell_target_uses_only_the_pair_average_on_dev_seen():
+    rows = pd.DataFrame([
+        {"backbone": "streetclip", "cell_target": 1000, "dev_seen_geoscore": 3000, "dev_unseen_geoscore": 0},
+        {"backbone": "clip_l14_336", "cell_target": 1000, "dev_seen_geoscore": 2000, "dev_unseen_geoscore": 0},
+        {"backbone": "streetclip", "cell_target": 2000, "dev_seen_geoscore": 2600, "dev_unseen_geoscore": 9e9},
+        {"backbone": "clip_l14_336", "cell_target": 2000, "dev_seen_geoscore": 2300, "dev_unseen_geoscore": 9e9},
+        {"backbone": "clip_b16", "cell_target": 2000, "dev_seen_geoscore": 9e9, "dev_unseen_geoscore": 9e9}])
+    target, avg = p3.pick_cell_target(rows)
+    assert target == 1000 and avg == {1000: 2500.0, 2000: 2450.0}  # not streetclip's or b16's best
+
+
+def test_hybrid_keeps_neighbours_in_the_top_cells_or_falls_back():
+    lat, lon = np.array([0.0, 0.0, 0.1, 20.0, 20.1]), np.array([0.0, 0.1, 0.0, 20.0, 20.0])
+    db_cells = np.array([0, 0, 0, 1, 1])
+    cent = np.array([[0.05, 0.05], [20.05, 20.0], [-30.0, -30.0]])
+    sims = np.array([[0.9, 0.8, 0.7, 0.6, 0.5], [0.9, 0.8, 0.7, 0.6, 0.5]])
+    idx = np.array([[3, 0, 4, 1, 2], [0, 1, 2, 3, 4]])
+    top = np.array([[1, 2], [2, 0]])  # query 1: its top cell (2) holds no neighbour
+    for pred, tau in (("medoid", None), ("mean", 0.1)):
+        (la, lo), fb = p3.hybrid_coords((sims, idx), db_cells, top, 1, pred, 3, tau, lat, lon, cent)
+        assert fb.tolist() == [False, True]
+        assert (la[1], lo[1]) == (-30.0, -30.0)  # fallback: the top cell's centroid
+        assert la[0] == pytest.approx(20.0, abs=0.2) and lo[0] == pytest.approx(20.0, abs=0.2)
+    (la, lo), fb = p3.hybrid_coords((sims, idx), db_cells, top, 2, "medoid", 5, None, lat, lon, cent)
+    assert not fb.any() and la[1] < 1  # m = 2: cell 0 counts too; cell 1 never does
+
+
+def test_cell_and_hybrid_grid(setup, monkeypatch):  # noqa: F811
+    tmp_path, _ = setup
+    dev_seen_n = len(pd.read_csv(tmp_path / "v2" / "dev_seen.csv"))
+    probe_calls, hybrid_sel = [], []
+    real_probe, real_choose = g.probe_logits, p3.choose_hybrid
+
+    def spy_probe(feats, labels, dev_feats, dev_labels, eval_feats, head_init, a, device):
+        probe_calls.append((len(dev_feats), np.asarray(labels).copy(), head_init.clone()))
+        return real_probe(feats, labels, dev_feats, dev_labels, eval_feats, head_init, a, device)
+
+    majority = []
+    real_major = p3.majority_country
+    monkeypatch.setattr(p3, "majority_country",
+                        lambda *a: majority.append(real_major(*a)) or majority[-1])
+    monkeypatch.setattr(g, "probe_logits", spy_probe)
+    monkeypatch.setattr(p3, "choose_hybrid", lambda nb, dbc, top, sel, *a: hybrid_sel.append(len(sel))
+                        or real_choose(nb, dbc, top, sel, *a))
+    args = ["--methods", "cell", "hybrid", "--cell-targets", "4", "8", "--probe-epochs", "3",
+            "--probe-lrs", "0.01", "0.1", "--mask-km", "20", "--k", "1", "5"]
+    table = p3.run(p3_args(tmp_path, *args))
+    out = tmp_path / "p3"
+    choice = json.loads((out / "cell_count.json").read_text())
+    assert choice["target"] in (4, 8) and choice["backbones"] == list(pe.PAIR)
+    assert set(probe_calls_n := {c[0] for c in probe_calls}) == {dev_seen_n}, probe_calls_n
+    assert set(hybrid_sel) == {dev_seen_n}
+    # selection: PAIR x 2 targets x 2 inits x 2 lrs; main grid: 3 bb x 4 subsets x 2 inits x 2
+    # lrs minus the copied selection cells (PAIR x nat 90 x 2 inits x 2 lrs)
+    assert len(probe_calls) == 2 * 2 * 2 * 2 + 3 * 4 * 2 * 2 - 2 * 2 * 2
+    assert set(table["variant"]) == {"geo_cell_random", "geo_cell_zeroshot", "geo_hybrid_random",
+                                     "geo_hybrid_zeroshot"}
+    assert (table["cell_target"] == choice["target"]).all()
+    assert table[table["predictor"].str.startswith("cell")]["lr"].isin([0.01, 0.1]).all()
+    gp = pd.read_csv(out / "gaps_geoscore.csv")
+    assert set(gp["variant"]) == set(table["variant"])
+    # zero-shot init: each cell's row = the text embedding of its majority country
+    text = g.text_head("m/x", json.loads((tmp_path / "v2" / "classes.json").read_text()), "")
+    heads = [c[2] for c in probe_calls]
+    assert len(majority) == (2 * 2 + 3 * 4 - 2)  # one per zero-shot cell probe (selection + grid)
+    for maj in majority:
+        assert sum(h.shape == text[maj].shape and np.allclose(h, text[maj]) for h in heads) >= 2
+    for d in (out / "streetclip").glob("*_geo_hybrid_*"):  # masking: a kept neighbour is > 20 km away
+        h = pd.read_csv(d / "dev_seen_geo_hits.csv")
+        assert (h["fallback"] == 0).any() and (h.loc[h["fallback"] == 0, "km"] > 20).all()
+    calls = len(probe_calls)
+    p3.run(p3_args(tmp_path, *args))  # everything cached: no probe trained again
+    assert len(probe_calls) == calls

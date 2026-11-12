@@ -207,6 +207,32 @@ embedding cache (encoder.json hash, file names and sizes), the k and tau grids, 
 dtype, seed, n_boot and the Phase 1 probe source (`cache_settings` in `geo_metrics.json`). The
 `geo_medoid` vs Phase 1 check runs only with `--mask-km 0`.
 
+Step 1 dev analysis (`scripts/analysis/phase3_dev_summary.py`, dev only, no test km or GeoScore):
+`results/v3/phase3_dev_summary.csv` (every predictor per backbone x ordering x N, both dev splits),
+`scaling_geo.png` and `gap_geo.png`, and `phase3_dev_leakage.csv`, an exploratory comparison of
+the masked `geo_medoid` (1 km mask, CPU fp32) with Phase 1's unmasked kNN coordinates (GPU fp16).
+The difference mixes the mask with the device/dtype change and is not a clean leakage estimate.
+`geo_mean` selected k=1 in every cell on dev_seen, i.e. it degenerated to `geo_top1`, so the
+hybrid's default predictor is `medoid` (`--hybrid-predictor`, chosen after seeing this dev result;
+`mean` stays selectable).
+
+Step 2, geocells (`METHODS=cell,hybrid bash scripts/kaggle_phase3.sh`, GPU session with
+internet on). `geocells.py` builds one quadtree on (lat, lon) from the coordinates of the full
+training pool (no labels, no images): a box splits into 4 while it holds more than
+`max_per_cell` points and is larger than 0.01 degrees; `max_per_cell` is set by bisection to hit
+the target count; a cell's centroid is the normalised 3D mean of its pool points (or its pool
+point nearest that mean when the mean leaves the box). The partition is saved as JSON and its
+sha256 enters the cache key. One partition serves every N (the same classes along the scaling
+curve), so it uses the pool's geographic density beyond a subset. `--methods cell` trains the
+Phase 1 probe (lr grid 1e-3..1e-1, 60 epochs, patience 8) over cell ids, random or zero-shot
+initialised (each cell: the text embedding of its majority country in the subset); the epoch is
+chosen by cell top-1 and the lr by GeoScore, both on dev_seen. `--methods hybrid` keeps the
+masked global kNN top-1000 inside the probe's top-m cells (m in {1, 3, 5}, chosen on dev_seen)
+and applies `--hybrid-predictor` (medoid by default), else the top cell's centroid. The cell
+count is chosen once: 1K/2K/5K cells for StreetCLIP and L/14-336 at nat 500K, the best average
+dev_seen GeoScore of the pair, recorded in `cell_count.json` and frozen for every backbone,
+ordering and N.
+
 Exploratory Phase 1 check in the same session: with the test embedding run (`emb_test`) and the
 Phase 1 dev output attached, `kaggle_phase3.sh` ends with `scripts/analysis/phase1_posthoc.py`,
 which recomputes the kNN cells whose dev_seen-matched k differs between the two backbones (k shared
