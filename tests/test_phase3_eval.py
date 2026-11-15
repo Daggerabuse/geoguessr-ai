@@ -432,6 +432,72 @@ def test_a_winning_extra_lr_rewrites_the_cell_under_the_extended_key(setup, monk
     assert cs["extra_lrs"] == [0.01] and row["cache_key"] == ext != old_row["cache_key"]
 
 
+def test_a_recorded_partition_is_loaded_not_rebuilt(setup, monkeypatch):  # noqa: F811
+    from geoguessr_ai import geocells as gc
+
+    tmp_path, _ = setup
+    monkeypatch.setattr(p3, "SELECT_N", 90)
+    args = ["--orderings", "nat", "--sizes", "90", "--probe-inits", "random", "--cell-targets",
+            "4", "--probe-epochs", "2", "--probe-lrs", "0.1", "--mask-km", "20", "--k", "1", "5"]
+    out = tmp_path / "p3"
+    p3.run(p3_args(tmp_path, *args, "--methods", "cell"))
+    rec = json.loads((out / "cell_count.json").read_text())
+    f = out / "geocells" / f"cells_{rec['target']}.json"
+    frozen = f.read_bytes()
+    assert gc.load(f)[1] == rec["geocells_sha256"]  # the file on disk is the recorded partition
+
+    real = gc.for_target
+
+    def other_cpu(*a, **k):  # a rebuild on another CPU: same cells, centroids 1 ulp apart
+        t = real(*a, **k)
+        return {**t, "centroid_lat": np.nextafter(t["centroid_lat"], 90).tolist()}
+
+    monkeypatch.setattr(gc, "for_target", other_cpu)
+    calls = []
+    monkeypatch.setattr(g, "probe_logits", lambda *a: calls.append(1) or (_ for _ in ()).throw(
+        AssertionError("no probe may retrain")))
+    table = p3.run(p3_args(tmp_path, *args, "--methods", "cell", "hybrid", "--device", ""))
+    assert calls == [] and f.read_bytes() == frozen  # loaded, never overwritten
+    assert (table["cell_target"] == rec["target"]).all()
+    assert set(table["variant"]) == {"geo_cell_random", "geo_hybrid_random"}
+
+    f.write_bytes(frozen.replace(b'"min_deg":0.01', b'"min_deg":0.02'))  # a corrupted file
+    with pytest.raises(SystemExit, match="the loaded file has sha256"):
+        p3.run(p3_args(tmp_path, *args, "--methods", "hybrid"))
+    f.unlink()  # no frozen file: rebuilt and checked (here the 'other CPU' rebuild differs)
+    with pytest.raises(SystemExit, match="the rebuilt partition"):
+        p3.run(p3_args(tmp_path, *args, "--methods", "hybrid"))
+    monkeypatch.setattr(gc, "for_target", real)
+    f.unlink()
+    p3.run(p3_args(tmp_path, *args, "--methods", "hybrid"))  # a bit-identical rebuild is accepted
+    assert f.read_bytes() == frozen and calls == []
+
+
+def test_partition_sha_is_the_same_on_every_numpy_simd_path(tmp_path):
+    """The build has no device code path; its float64 trig and sums follow numpy's CPU
+    dispatch. Rebuild with every dispatch target this CPU has disabled (baseline only) and
+    compare (on an AVX-512 host this covers the AVX-512 path)."""
+    import subprocess
+
+    from numpy._core._multiarray_umath import __cpu_dispatch__, __cpu_features__
+
+    on = [t for t in __cpu_dispatch__ if __cpu_features__.get(t)]
+    if not on:
+        pytest.skip("no numpy dispatch target above the baseline on this CPU")
+    code = ("import numpy as np, sys; from geoguessr_ai import geocells as gc; "
+            "r = np.random.default_rng(0); lat = np.concatenate([r.normal(48, 3, 6000), "
+            "r.uniform(-60, 70, 4000)]).clip(-89, 89); lon = r.uniform(-180, 180, 10000); "
+            "print(gc.save(gc.for_target(lat, lon, 200), __import__('pathlib').Path(sys.argv[1])))")
+    sha = {}
+    for name, env in (("default", {}), ("baseline", {"NPY_DISABLE_CPU_FEATURES": " ".join(on)})):
+        r = subprocess.run([sys.executable, "-c", code, str(tmp_path / f"{name}.json")],
+                           capture_output=True, text=True, check=False,
+                           env={**__import__("os").environ, **env})
+        assert r.returncode == 0, r.stderr
+        sha[name] = r.stdout.strip()
+    assert sha["default"] == sha["baseline"], f"disabled {on}: {sha}"
+
+
 def test_cell_count_selection_refuses_without_select_n(setup):  # noqa: F811
     tmp_path, _ = setup
     with pytest.raises(SystemExit, match="include 500000 in --sizes or pass --cell-target"):

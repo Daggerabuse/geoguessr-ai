@@ -249,8 +249,14 @@ Decisions made before any Step 2 result (changes to the first Step 2 design):
   with both inits ≈ 2.6 h vs ≈ 1.3 h). It stays neutral between the compared backbones (average
   of StreetCLIP and L/14-336); the zero-shot variant uses the frozen count chosen this way. The
   selection refuses to run unless 500000 is among `--sizes` (or `--cell-target` is given), so a
-  `SIZES` subset cannot freeze a count chosen at a smaller N. Every later run rebuilds the
-  partition and aborts if its sha256 differs from the one in `cell_count.json`.
+  `SIZES` subset cannot freeze a count chosen at a smaller N. Every later run loads the frozen
+  partition file (`geocells/cells_<target>.json`, carried over by `SEED_FROM`) and aborts if
+  its sha256 differs from the one in `cell_count.json`. Only without that file is it rebuilt,
+  and the rebuild must hash the same. (Fix after the first hybrid session: that run rebuilt
+  the partition on a CPU-only host and got another sha256 than the GPU sessions, with the same
+  cell count and `max_per_cell`. The tree comes from comparisons and exact halving only, so the
+  difference is in the float64 centroids, whose trig and sums follow numpy's CPU-dependent
+  SIMD paths. The rebuild also overwrote the seeded file before the check; it no longer does.)
 - **The hybrid runs in a CPU-only session.** Cell probes (GPU) and hybrid (CPU) are separate
   runs: the hybrid's kNN is the Step 1 setting (numpy fp32, `--device ''`), so Step 1 and the
   hybrid share one numerical pin. (Before: kNN on cuda in the same GPU session.)

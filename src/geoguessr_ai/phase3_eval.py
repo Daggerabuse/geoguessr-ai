@@ -298,8 +298,33 @@ def make_geo(data: Path, out: Path, target: int) -> dict:
     sha = gc.save(tree, out / "geocells" / f"cells_{target}.json")
     print(f"geocells: target {target} -> {gc.n_cells(tree)} cells (max_per_cell "
           f"{tree['max_per_cell']}), sha256 {sha[:16]}", flush=True)
+    return geo_of(tree, sha, target)
+
+
+def geo_of(tree: dict, sha: str, target: int) -> dict:
     cent = np.stack([tree["centroid_lat"], tree["centroid_lon"]], axis=1)
     return {"tree": tree, "sha": sha, "target": target, "cent": cent}
+
+
+def frozen_geo(data: Path, out: Path, rec: dict, record: Path) -> dict:
+    """The partition recorded in cell_count.json: LOADED from out/geocells when the file is there
+    (a rebuild is not bit-identical across CPUs: the centroids' float64 trig and sums follow
+    numpy's CPU-dependent SIMD paths), else rebuilt once; either way its sha256 must be the
+    recorded one. The frozen file is never overwritten."""
+    target, want = rec["target"], rec.get("geocells_sha256")
+    path = out / "geocells" / f"cells_{target}.json"
+    if path.exists():
+        tree, sha = gc.load(path)
+        print(f"geocells: loaded the frozen partition {path} ({gc.n_cells(tree)} cells), "
+              f"sha256 {sha[:16]}", flush=True)
+        geo, how = geo_of(tree, sha, target), "the loaded file"
+    else:
+        geo, how = make_geo(data, out, target), "the rebuilt partition (no frozen file in out)"
+    if geo["sha"] != want:  # else every probe would silently retrain
+        raise SystemExit(f"geocell partition for target {target}: {how} has sha256 "
+                         f"{geo['sha'][:16]}, but {record} recorded {str(want)[:16]}; attach the "
+                         f"output holding the frozen {path.name} (SEED_FROM)")
+    return geo
 
 
 def majority_country(cells, labels, n_cells: int, cent, lat, lon) -> np.ndarray:
@@ -753,20 +778,14 @@ def cell_geo(args: argparse.Namespace) -> dict:
     else chosen now, once: the cell probe (random init only) for the PAIR backbones at nat and
     N = SELECT_N (must be in --sizes) for every CELL_TARGETS count, then the count with the best
     average dev_seen GeoScore of the pair (pick_cell_target), frozen for both inits. Its cells
-    are copied into the main grid. A recorded choice whose rebuilt partition has another sha256
-    is refused."""
+    are copied into the main grid. A recorded choice is loaded from out/geocells (frozen_geo);
+    its sha256 must be the recorded one."""
     out, data = Path(args.out), Path(args.data)
     if args.cell_target:
         return make_geo(data, out, args.cell_target)
     f = out / "cell_count.json"
     if f.exists():
-        rec = json.loads(f.read_text())
-        geo = make_geo(data, out, rec["target"])
-        if geo["sha"] != rec.get("geocells_sha256"):  # else every probe would silently retrain
-            raise SystemExit(f"geocell partition for target {rec['target']} has sha256 "
-                             f"{geo['sha'][:16]}, but {f} recorded "
-                             f"{str(rec.get('geocells_sha256'))[:16]}: same data and geocells.py?")
-        return geo
+        return frozen_geo(data, out, json.loads(f.read_text()), f)
     if "cell" not in args.methods:
         raise SystemExit(f"--methods hybrid needs {f} (or --cell-target): run --methods cell first")
     if SELECT_N not in args.sizes:
