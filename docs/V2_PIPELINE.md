@@ -257,6 +257,37 @@ Decisions made before any Step 2 result (changes to the first Step 2 design):
 - Not changed: `--hybrid-predictor` defaults to `medoid` (`geo_mean` degenerated to top-1 on
   dev, see above).
 
+Decisions made after Step 2 finished, before the lr counts were computed (2026-11-15):
+- **Probe lr-grid edge (cell probes).** Per init (random, zeroshot) and per edge of the grid
+  {1e-3, 3e-3, 1e-2, 3e-2, 1e-1}: if the lower edge 1e-3 is the selected lr in at least 8 of
+  that init's 24 cells (3 backbones x nat/bal x 4 N), 3e-4 is added for that init; if the upper
+  edge 1e-1 is selected in at least 8, 3e-1 is added. The added lr runs on all 24 cells of
+  that init, incrementally (stored lr runs reused, choice made over the merged sweep, as in
+  Phase 1); selection is unchanged (epoch by cell top-1, lr by GeoScore, both on dev_seen).
+  Stopping rule (Phase 1's): this is the final extension. If an added edge lr is then
+  selected, or an edge is selected in fewer than 8 cells, the grid stays frozen and those cells
+  are flagged `grid_edge` and reported as a limitation.
+- Honest note: the threshold was set after partially seeing the live Kaggle logs (a few
+  zero-shot cells visibly picked 1e-3; B/16 nat 200K picked 1e-2). The full counts had not been
+  computed when this rule was written. Counts and per-cell neighbour GeoScores:
+  `scripts/analysis/phase3_cell_lr.py` -> `results/v3/phase3_cell_lr.csv`.
+- Outcome: the zero-shot lower edge met the threshold and no other init x edge did, so
+  `phase3_eval.EXTRA_LRS = {"zeroshot": (3e-4,)}`. An init's extra lrs enter its cell key only
+  when it has any (`extra_lrs` in `cache_settings`), so the random cells keep their keys. A
+  zero-shot cell whose row still has the base-grid key is resumed: its stored lr runs are reused,
+  only 3e-4 is trained, and if 3e-4 does not beat the stored choice (a tie keeps it) its scores
+  and top-cells files stand. Its hybrid reruns, because the probe key changed. Kaggle notebooks:
+  `runs/kaggle_phase3_extend_cells.ipynb` (GPU, zero-shot only) and
+  `runs/kaggle_phase3_hybrid.ipynb` (CPU; random now, zero-shot after the extension).
+
+Step 2 dev analysis (`scripts/analysis/phase3_cell_summary.py`, dev only, reads every cell's
+`row.json` and `*_geo_hits.csv`): `results/v3/phase3_cell_init_gap.csv` (zero-shot - random),
+`phase3_cell_backbone_gap.csv` (StreetCLIP - L/14-336 and StreetCLIP - B/16 per init),
+`phase3_cell_best.csv` (best of geo_medoid / cell_random / cell_zeroshot per backbone x subset by
+dev_seen GeoScore, with its paired gap vs geo_medoid; masked kNN vs unmasked probe, so not like
+for like), `phase3_cell_scaling.png` and `phase3_cell_gap.png`. Paired cluster-bootstrap intervals
+need `--data` (dev_seen.csv and dev.csv for the clusters); without it they are NaN.
+
 Sessions (`kaggle_phase3.sh`; env: `METHODS`, `BACKBONES`, `ORDERINGS`, `SIZES`, `PROBE_INITS`,
 `DEADLINE_MIN`, `SEED_FROM`). At `DEADLINE_MIN` a STOP marker lets the cell in hand finish, then
 the run prints RESUME NEEDED and exits 3 (hard kill GRACE_MIN, default 45, later; that cell is

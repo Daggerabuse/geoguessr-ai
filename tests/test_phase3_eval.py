@@ -320,14 +320,18 @@ def test_cell_and_hybrid_grid(setup, monkeypatch):  # noqa: F811
     assert set(probe_calls_n := {c[0] for c in probe_calls}) == {dev_seen_n}, probe_calls_n
     assert set(hybrid_sel) == {dev_seen_n}
     # selection: PAIR x 2 targets x the random init only x 2 lrs; main grid: 3 bb x 4 subsets x
-    # 2 inits x 2 lrs minus the copied selection cells (PAIR x nat 90 x random x 2 lrs)
-    assert len(probe_calls) == 2 * 2 * 2 + 3 * 4 * 2 * 2 - 2 * 2
+    # 2 inits x 2 lrs minus the copied selection cells (PAIR x nat 90 x random x 2 lrs), plus
+    # the zero-shot EXTRA_LRS
+    extra = len(p3.EXTRA_LRS.get("zeroshot", ()))
+    assert len(probe_calls) == 2 * 2 * 2 + 3 * 4 * 2 * 2 - 2 * 2 + 3 * 4 * extra
     assert not list((out / "cell_select").glob("*/*/*zeroshot*"))
     assert choice["probe_init"] == "random"
     assert set(table["variant"]) == {"geo_cell_random", "geo_cell_zeroshot", "geo_hybrid_random",
                                      "geo_hybrid_zeroshot"}
     assert (table["cell_target"] == choice["target"]).all()
-    assert table[table["predictor"].str.startswith("cell")]["lr"].isin([0.01, 0.1]).all()
+    assert table[table["predictor"] == "cell_random"]["lr"].isin([0.01, 0.1]).all()
+    assert table[table["predictor"] == "cell_zeroshot"]["lr"].isin(
+        [0.01, 0.1, *p3.EXTRA_LRS.get("zeroshot", ())]).all()
     gp = pd.read_csv(out / "gaps_geoscore.csv")
     assert set(gp["variant"]) == set(table["variant"])
     # zero-shot init: each cell's row = the text embedding of its majority country
@@ -347,6 +351,40 @@ def test_cell_and_hybrid_grid(setup, monkeypatch):  # noqa: F811
     with pytest.raises(SystemExit, match="geocell partition"):  # a resumed run checks the partition
         p3.run(p3_args(tmp_path, *args))
     assert len(probe_calls) == calls
+
+
+def test_extra_lrs_resume_only_their_init_and_keep_other_keys(setup, monkeypatch):  # noqa: F811
+    tmp_path, _ = setup
+    base = ["--backbones", "streetclip", "--orderings", "nat", "--sizes", "90", *CELL_ARGS]
+    d = tmp_path / "p3" / "streetclip"
+    row = lambda i: json.loads((d / f"nat_90_geo_cell_{i}" / "row.json").read_text())
+    gm = lambda i: json.loads((d / f"nat_90_geo_cell_{i}" / "geo_metrics.json").read_text())
+    monkeypatch.setattr(p3, "EXTRA_LRS", {})  # the base grid, as Step 2 ran it
+    p3.run(p3_args(tmp_path, *base, "--methods", "cell", "hybrid"))
+    old = {i: row(i)["cache_key"] for i in ("random", "zeroshot")}
+    assert old["random"] == old["zeroshot"]
+    files = {s: (d / "nat_90_geo_cell_zeroshot" / f"{s}_top_cells.csv").read_bytes()
+             for s in p3.SPLITS}
+    calls, hyb = [], []
+    real, real_h = g.probe_logits, p3.run_hybrid
+    monkeypatch.setattr(g, "probe_logits", lambda *a: calls.append(a[6].probe_lr) or real(*a))
+    monkeypatch.setattr(p3, "run_hybrid", lambda *a, **k: hyb.append(list(a[5])) or real_h(*a, **k))
+    monkeypatch.setattr(p3, "EXTRA_LRS", {"zeroshot": (0.01,)})
+    p3.run(p3_args(tmp_path, *base, "--methods", "cell", "hybrid"))
+    assert calls == [0.01]  # only the extra lr of the zero-shot cell is trained
+    assert row("random")["cache_key"] == old["random"] and row("zeroshot")["cache_key"] != old["zeroshot"]
+    z = gm("zeroshot")
+    assert [e["lr"] for e in z["sweep_dev_seen"]] == [0.01, 0.1] and z["reused_lrs"] == [0.1]
+    assert z["cache_settings"]["extra_lrs"] == [0.01] and "extra_lrs" not in gm("random")["cache_settings"]
+    gs = {e["lr"]: e["dev_seen_geoscore"] for e in z["sweep_dev_seen"]}
+    best = 0.01 if gs[0.01] > gs[0.1] else 0.1  # a tie keeps the stored choice
+    assert z["lr"] == best and z["prev_lr"] == 0.1
+    same = all((d / "nat_90_geo_cell_zeroshot" / f"{s}_top_cells.csv").read_bytes() == files[s]
+               for s in p3.SPLITS)
+    assert same == (best == 0.1)  # the stored choice's files stand unless the extra lr wins
+    assert hyb == [["zeroshot"]]  # the probe key changed: only the zero-shot hybrid reruns
+    p3.run(p3_args(tmp_path, *base, "--methods", "cell", "hybrid"))
+    assert calls == [0.01] and hyb == [["zeroshot"]]  # all cached now
 
 
 def test_cell_count_selection_refuses_without_select_n(setup):  # noqa: F811
