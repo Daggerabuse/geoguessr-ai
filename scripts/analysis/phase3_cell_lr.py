@@ -43,6 +43,9 @@ def cell_rows(run: Path) -> pd.DataFrame:
                                  for e in sw.values())
                     rows.append({"backbone": bb, "ordering": o, "n": n, "init": init,
                                  "lr": gm["lr"], "epoch": gm["epoch"],
+                                 "stopped_early": gm["stopped_early"],
+                                 "probe_epochs": cs["probe_epochs"],
+                                 "grid": " ".join(f"{x:g}" for x in grid),
                                  "geoscore_sel": sw[gm["lr"]]["dev_seen_geoscore"],
                                  "lr_lower": grid[i - 1] if i > 0 else float("nan"),
                                  "geoscore_lower": sw[grid[i - 1]]["dev_seen_geoscore"] if i > 0 else float("nan"),
