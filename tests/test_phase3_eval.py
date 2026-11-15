@@ -387,6 +387,51 @@ def test_extra_lrs_resume_only_their_init_and_keep_other_keys(setup, monkeypatch
     assert calls == [0.01] and hyb == [["zeroshot"]]  # all cached now
 
 
+def test_a_winning_extra_lr_rewrites_the_cell_under_the_extended_key(setup, monkeypatch):  # noqa: F811
+    tmp_path, _ = setup
+    base = ["--backbones", "streetclip", "--orderings", "nat", "--sizes", "90", *CELL_ARGS,
+            "--probe-inits", "zeroshot", "--methods", "cell"]
+    d = tmp_path / "p3" / "streetclip" / "nat_90_geo_cell_zeroshot"
+    read = lambda f: json.loads((d / f).read_text())
+    monkeypatch.setattr(p3, "EXTRA_LRS", {})
+    p3.run(p3_args(tmp_path, *base))
+    old_row, old_gm = read("row.json"), read("geo_metrics.json")
+    old_hits = (d / "dev_seen_geo_hits.csv").read_bytes()
+    real, true_cells = g.probe_logits, {}
+
+    def winning(*a):  # the extra lr: the true dev_seen cell on top, so it must win
+        logits, hist = real(*a)
+        if a[6].probe_lr == 0.01:
+            lab = np.asarray(a[3])
+            true_cells["dev_seen"] = lab
+            logits["dev_seen"] = logits["dev_seen"].copy()
+            logits["dev_seen"][np.arange(len(lab)), lab] += 1e6
+        return logits, hist
+
+    monkeypatch.setattr(g, "probe_logits", winning)
+    monkeypatch.setattr(p3, "EXTRA_LRS", {"zeroshot": (0.01,)})
+    p3.run(p3_args(tmp_path, *base))
+    row, gm = read("row.json"), read("geo_metrics.json")
+    gs = {e["lr"]: e["dev_seen_geoscore"] for e in gm["sweep_dev_seen"]}
+    assert gs[0.01] > gs[0.1] == old_gm["sweep_dev_seen"][0]["dev_seen_geoscore"]
+    # merged sweep, the new choice and what it replaced
+    assert sorted(gs) == [0.01, 0.1] and gm["reused_lrs"] == [0.1]
+    assert gm["lr"] == row["lr"] == 0.01 and gm["prev_lr"] == 0.1
+    assert gm["prev_dev_seen_geoscore"] == gs[0.1]
+    # new top cells and scores were written
+    top = pd.read_csv(d / "dev_seen_top_cells.csv")
+    assert (top["c0"].to_numpy() == true_cells["dev_seen"]).all()
+    assert (d / "dev_seen_geo_hits.csv").read_bytes() != old_hits
+    assert row["dev_seen_geoscore"] == pytest.approx(gs[0.01])
+    assert row["dev_seen_geoscore"] > old_row["dev_seen_geoscore"]
+    # the row carries the extended key, computed independently of the run
+    cs = gm["cache_settings"]
+    ext = p3.cache_key(p3.cache_settings(p3_args(tmp_path, *base), tmp_path / "v2",
+                                         tmp_path / "emb" / "streetclip", "cell",
+                                         (cs["geocells_sha256"], cs["cell_target"]), "zeroshot"))
+    assert cs["extra_lrs"] == [0.01] and row["cache_key"] == ext != old_row["cache_key"]
+
+
 def test_cell_count_selection_refuses_without_select_n(setup):  # noqa: F811
     tmp_path, _ = setup
     with pytest.raises(SystemExit, match="include 500000 in --sizes or pass --cell-target"):

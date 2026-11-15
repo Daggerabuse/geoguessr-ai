@@ -268,7 +268,8 @@ Decisions made after Step 2 finished, before the lr counts were computed (2026-1
   selected, or an edge is selected in fewer than 8 cells, the grid stays frozen and those cells
   are flagged `grid_edge` and reported as a limitation.
 - Honest note: the threshold was set after partially seeing the live Kaggle logs (a few
-  zero-shot cells visibly picked 1e-3; B/16 nat 200K picked 1e-2). The full counts had not been
+  zero-shot cells visibly picked 1e-3; B/16 nat 200K picked 1e-2 (this live reading was mistaken;
+  the saved sweep shows 1e-3)). The full counts had not been
   computed when this rule was written. Counts and per-cell neighbour GeoScores:
   `scripts/analysis/phase3_cell_lr.py` -> `results/v3/phase3_cell_lr.csv`.
 - Outcome: the zero-shot lower edge met the threshold and no other init x edge did, so
