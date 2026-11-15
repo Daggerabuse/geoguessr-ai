@@ -239,9 +239,11 @@ def text_head(model_name: str, classes: list[str], template: str):
         return as_embedding(text(**t), "text", text.config.projection_dim).float()
 
 
-def probe_logits(feats, labels, dev_feats, dev_labels, eval_feats: dict, head_init, args, device):
+def probe_logits(feats, labels, dev_feats, dev_labels, eval_feats: dict, head_init, args, device,
+                 save_head=None):
     """Train train.py's probe (cosine head, epoch chosen by top-1 on dev_feats, the
-    selection split); return logits per split."""
+    selection split); return logits per split. save_head: .npy path for the trained head rows
+    (unnormalised, float32)."""
     import torch
     import torch.nn.functional as F
     from torch import nn
@@ -260,6 +262,8 @@ def probe_logits(feats, labels, dev_feats, dev_labels, eval_feats: dict, head_in
     t = lambda x: torch.from_numpy(x).to(device)
     history: list[dict] = []
     train_probe(model, t(feats), labels, t(dev_feats), dev_labels, args, device, history)
+    if save_head:
+        np.save(save_head, model.head.detach().cpu().numpy())
     with torch.no_grad():
         return {k: model.logits_from_embed(t(v)).cpu().numpy() for k, v in eval_feats.items()}, history
 

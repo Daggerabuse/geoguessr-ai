@@ -1,0 +1,1257 @@
+{
+  "note": "Phase 3 coordinates on the official test split; frozen before any test distance is read. Every value below is the dev_seen selection of the stored dev runs, used as it is (no search on test). See docs/V2_PIPELINE.md.",
+  "created_utc": "2026-11-15T21:43:00Z",
+  "dev_results": "results/v3/phase3_dev_predictors.csv",
+  "dev_results_sha256": "7f7c36e4a63e9f1ff588659d5db2fa277830dd35332d42a0bd950ef5a600eb43",
+  "primary": {
+    "predictor": "hybrid_zeroshot",
+    "metric": "geoscore",
+    "pair": [
+      "streetclip",
+      "clip_l14_336"
+    ],
+    "why": "dev only: by dev_seen GeoScore the best of the five predictors is a hybrid in every backbone x ordering x N cell and the zero-shot hybrid in most; mean GeoScore is the quantity every selection (k, m, lr, cell count) maximised, median km was never selected on"
+  },
+  "settings": {
+    "seed": 42,
+    "n_boot": 1000,
+    "mask_km": 1.0,
+    "knn_device": "cpu",
+    "knn_dtype": "fp32",
+    "k": [
+      1,
+      5,
+      10,
+      25,
+      50,
+      100
+    ],
+    "data_config_sha256": "4c19636e5b98042b23b85fcfb08c9e49e9790db0c996862f35b89bf225929260",
+    "label_smoothing": 0.1,
+    "logit_scale": 100.0,
+    "template": "A street view photo taken in {}.",
+    "probe_batch": 256,
+    "probe_epochs": 60,
+    "probe_patience": 8,
+    "probe_lrs": [
+      0.001,
+      0.003,
+      0.01,
+      0.03,
+      0.1
+    ],
+    "hybrid_k": 1000,
+    "hybrid_predictor": "medoid",
+    "hybrid_m": [
+      1,
+      3,
+      5
+    ]
+  },
+  "emb_encoder_sha256": {
+    "streetclip": "3c01fc99c9cc3db55e116811565b3048e6b7b80bc79c6b0b91ca7d0b281f652b",
+    "clip_l14_336": "781e127337dc3a8ec08faed9c1b1aa6f2c8828dab111bde947f96bc6f83bf400"
+  },
+  "geocells": {
+    "target": 5000,
+    "n_cells": 5000,
+    "sha256": "9882eb2ae7124f3331859bbf742a52c9d30fca517a31d16a83bfd77d6b74662b"
+  },
+  "search": {
+    "rule": "all grids are final (docs/V2_PIPELINE.md: lr-edge rule, m grid); a choice at an edge is kept and listed per cell in grid_edge",
+    "probe_lrs": [
+      0.001,
+      0.003,
+      0.01,
+      0.03,
+      0.1
+    ],
+    "extra_lrs": {
+      "zeroshot": [
+        0.0003
+      ]
+    },
+    "probe_epochs": 60,
+    "probe_patience": 8,
+    "k": [
+      1,
+      5,
+      10,
+      25,
+      50,
+      100
+    ],
+    "hybrid_m": [
+      1,
+      3,
+      5
+    ]
+  },
+  "reproduction": {
+    "top1_cell_same_min": 0.99,
+    "top5_set_same_min": 0.95,
+    "probe_geoscore_abs_max": 2.0,
+    "hybrid_geoscore_abs_max": 2.0,
+    "medoid_geoscore_abs_max": 0.5,
+    "split": "dev_seen",
+    "probe": "retrained once: frozen lr, exactly `epoch` epochs, same seed, last head. top1_cell_same = share of dev_seen queries with the same argmax cell as the stored dev_seen_top_cells.csv (sha256 per cell below); top5_set_same = share with the same set of 5 cells; geoscore = mean GeoScore of the argmax cell's centroid vs dev_seen_geoscore",
+    "hybrid_medoid": "recomputed on the CPU (fp32) with the frozen m, k from the retrained probe's top cells; mean GeoScore vs dev_seen_geoscore",
+    "rule": "checked twice (probes: GPU logits; test: the saved head applied on the CPU). Every test session first checks ALL declared cells of BOTH backbones on dev_seen; if ANY is outside a tolerance it stops before the test split is loaded; no cell is dropped and no hypothesis is evaluated on a subset. A tolerance may only be changed by a dated amendment to this file, committed before any test distance is read, that publishes every failing number",
+    "one_run": "the result is the first run: one probes output (repro.json, its sha256), one code commit with no modified tracked file, one pre-registration sha256. They are written into dev_check.json, test_read_started.json and every test_row.json; `primary` refuses cells of different runs"
+  },
+  "hypotheses": {
+    "statistic": "mean over test images of sum_terms w * per-image GeoScore of the term's cell (5000 * exp(-km / 1492.7)); images scored by every cell of the hypothesis (n_images is reported)",
+    "criterion": "supported if the Holm-adjusted one-sided p-value < alpha; no other outcome of this run changes a verdict",
+    "p_value": "one-sided, from n_boot paired cluster-bootstrap resamples of the statistic (one resample of clusters applies to every cell of the hypothesis; the same resamples for every hypothesis): p = (1 + #{resampled statistic <= 0}) / (n_boot + 1)",
+    "clusters": "creator_id of test.csv (v2_data.normalize_creators: a missing creator -> its sequence)",
+    "sensitivity": "the same with sequence clusters (Phase 1's unit), reported next to each hypothesis (seq_*); it decides nothing",
+    "interval": "uncorrected 95% percentile interval of the same resamples",
+    "multiplicity": "Holm-Bonferroni over all primary hypotheses (family-wise alpha). The analysis runs once, when every declared cell is scored. If a cell cannot be scored after test_read_started.json exists, its hypotheses are not evaluable and count with p = 1 (primary --missing-as-p1); a later fix is a published amendment and is reported next to that result, not instead",
+    "alpha": 0.05,
+    "n_boot": 10000,
+    "seed": 42,
+    "primary": [
+      {
+        "id": "H1/gap/bal",
+        "terms": [
+          {
+            "w": 1.0,
+            "backbone": "streetclip",
+            "ordering": "bal",
+            "n": 50000,
+            "predictor": "hybrid_zeroshot"
+          },
+          {
+            "w": -1.0,
+            "backbone": "clip_l14_336",
+            "ordering": "bal",
+            "n": 50000,
+            "predictor": "hybrid_zeroshot"
+          }
+        ],
+        "claim": "streetclip - clip_l14_336 test GeoScore, hybrid_zeroshot, bal N=50000 > 0"
+      },
+      {
+        "id": "H2/gap/nat",
+        "terms": [
+          {
+            "w": 1.0,
+            "backbone": "streetclip",
+            "ordering": "nat",
+            "n": 50000,
+            "predictor": "hybrid_zeroshot"
+          },
+          {
+            "w": -1.0,
+            "backbone": "clip_l14_336",
+            "ordering": "nat",
+            "n": 50000,
+            "predictor": "hybrid_zeroshot"
+          }
+        ],
+        "claim": "streetclip - clip_l14_336 test GeoScore, hybrid_zeroshot, nat N=50000 > 0"
+      },
+      {
+        "id": "H3/shrink/bal",
+        "terms": [
+          {
+            "w": 1.0,
+            "backbone": "streetclip",
+            "ordering": "bal",
+            "n": 50000,
+            "predictor": "hybrid_zeroshot"
+          },
+          {
+            "w": -1.0,
+            "backbone": "clip_l14_336",
+            "ordering": "bal",
+            "n": 50000,
+            "predictor": "hybrid_zeroshot"
+          },
+          {
+            "w": -1.0,
+            "backbone": "streetclip",
+            "ordering": "bal",
+            "n": 500000,
+            "predictor": "hybrid_zeroshot"
+          },
+          {
+            "w": 1.0,
+            "backbone": "clip_l14_336",
+            "ordering": "bal",
+            "n": 500000,
+            "predictor": "hybrid_zeroshot"
+          }
+        ],
+        "claim": "gap(N=50000) - gap(N=500000), hybrid_zeroshot, bal > 0 (the gap shrinks)"
+      },
+      {
+        "id": "H4/init/nat",
+        "terms": [
+          {
+            "w": 1.0,
+            "backbone": "streetclip",
+            "ordering": "nat",
+            "n": 50000,
+            "predictor": "cell_random"
+          },
+          {
+            "w": -1.0,
+            "backbone": "clip_l14_336",
+            "ordering": "nat",
+            "n": 50000,
+            "predictor": "cell_random"
+          },
+          {
+            "w": -1.0,
+            "backbone": "streetclip",
+            "ordering": "nat",
+            "n": 50000,
+            "predictor": "cell_zeroshot"
+          },
+          {
+            "w": 1.0,
+            "backbone": "clip_l14_336",
+            "ordering": "nat",
+            "n": 50000,
+            "predictor": "cell_zeroshot"
+          }
+        ],
+        "claim": "gap(cell_random) - gap(cell_zeroshot), nat N=50000 > 0 (zero-shot init narrows the gap)"
+      },
+      {
+        "id": "H5/init/bal",
+        "terms": [
+          {
+            "w": 1.0,
+            "backbone": "streetclip",
+            "ordering": "bal",
+            "n": 50000,
+            "predictor": "cell_random"
+          },
+          {
+            "w": -1.0,
+            "backbone": "clip_l14_336",
+            "ordering": "bal",
+            "n": 50000,
+            "predictor": "cell_random"
+          },
+          {
+            "w": -1.0,
+            "backbone": "streetclip",
+            "ordering": "bal",
+            "n": 50000,
+            "predictor": "cell_zeroshot"
+          },
+          {
+            "w": 1.0,
+            "backbone": "clip_l14_336",
+            "ordering": "bal",
+            "n": 50000,
+            "predictor": "cell_zeroshot"
+          }
+        ],
+        "claim": "gap(cell_random) - gap(cell_zeroshot), bal N=50000 > 0 (zero-shot init narrows the gap)"
+      }
+    ],
+    "exploratory": [
+      {
+        "id": "E1/hybrid_vs_knn/nat",
+        "terms": [
+          {
+            "w": 0.5,
+            "backbone": "streetclip",
+            "ordering": "nat",
+            "n": 500000,
+            "predictor": "hybrid_zeroshot"
+          },
+          {
+            "w": -0.5,
+            "backbone": "streetclip",
+            "ordering": "nat",
+            "n": 500000,
+            "predictor": "medoid"
+          },
+          {
+            "w": 0.5,
+            "backbone": "clip_l14_336",
+            "ordering": "nat",
+            "n": 500000,
+            "predictor": "hybrid_zeroshot"
+          },
+          {
+            "w": -0.5,
+            "backbone": "clip_l14_336",
+            "ordering": "nat",
+            "n": 500000,
+            "predictor": "medoid"
+          }
+        ],
+        "claim": "GeoScore(hybrid_zeroshot) - GeoScore(medoid), nat N=500000, average of streetclip and clip_l14_336; not like for like (kNN parts under the 1 km mask, the probe trained unmasked): estimate and uncorrected interval only, no verdict"
+      }
+    ],
+    "secondary": "every other output is exploratory: the contrasts under `exploratory` (exploratory_contrasts.csv), 100K/200K, hybrid_random, the gap of each other predictor, shrink at nat, median km and accuracy within 25/200/750/2500 km, dev splits, any per-country or per-creator breakdown"
+  },
+  "cells": [
+    {
+      "backbone": "streetclip",
+      "ordering": "nat",
+      "n": 50000,
+      "predictor": "medoid",
+      "dev_seen_geoscore": 4013.058260223098,
+      "dev_unseen_geoscore": 3669.1773306583623,
+      "grid_edge": "",
+      "k": 10
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "nat",
+      "n": 50000,
+      "predictor": "cell_random",
+      "dev_seen_geoscore": 4005.507377839824,
+      "dev_unseen_geoscore": 3637.0746113983505,
+      "grid_edge": "",
+      "lr": 0.003,
+      "epoch": 44,
+      "extra_lrs": [],
+      "dev_seen_top_cells_sha256": "d4440eb04d51789147c53bcf8f6da86138fe09f118cacb27dce2571a4e67dac1"
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "nat",
+      "n": 50000,
+      "predictor": "cell_zeroshot",
+      "dev_seen_geoscore": 4053.086538943229,
+      "dev_unseen_geoscore": 3708.8645901288965,
+      "grid_edge": "",
+      "lr": 0.001,
+      "epoch": 48,
+      "extra_lrs": [
+        0.0003
+      ],
+      "dev_seen_top_cells_sha256": "32fb5c8040b2dde49caeb1ca7ecf3762ab6f478f031d1aeb2ea6aa991751b3b6"
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "nat",
+      "n": 50000,
+      "predictor": "hybrid_random",
+      "dev_seen_geoscore": 4074.864070681109,
+      "dev_unseen_geoscore": 3728.7187263204164,
+      "grid_edge": "m_high",
+      "m": 5,
+      "k": 5
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "nat",
+      "n": 50000,
+      "predictor": "hybrid_zeroshot",
+      "dev_seen_geoscore": 4087.8578250156675,
+      "dev_unseen_geoscore": 3788.0920888504975,
+      "grid_edge": "m_high",
+      "m": 5,
+      "k": 10
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "nat",
+      "n": 100000,
+      "predictor": "medoid",
+      "dev_seen_geoscore": 4092.62135340976,
+      "dev_unseen_geoscore": 3705.698123104812,
+      "grid_edge": "",
+      "k": 10
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "nat",
+      "n": 100000,
+      "predictor": "cell_random",
+      "dev_seen_geoscore": 4118.169042845754,
+      "dev_unseen_geoscore": 3705.386257768304,
+      "grid_edge": "never_stopped_early",
+      "lr": 0.003,
+      "epoch": 56,
+      "extra_lrs": [],
+      "dev_seen_top_cells_sha256": "e85252557336dac2cf93502a80995e4af736904968f6febfc14716e37c077a0e"
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "nat",
+      "n": 100000,
+      "predictor": "cell_zeroshot",
+      "dev_seen_geoscore": 4142.502919690565,
+      "dev_unseen_geoscore": 3772.6285142631514,
+      "grid_edge": "",
+      "lr": 0.001,
+      "epoch": 24,
+      "extra_lrs": [
+        0.0003
+      ],
+      "dev_seen_top_cells_sha256": "cf66193d5384ff23847b25700fcc9456e3b8050314edd90f86dda105e3063c80"
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "nat",
+      "n": 100000,
+      "predictor": "hybrid_random",
+      "dev_seen_geoscore": 4178.044113427555,
+      "dev_unseen_geoscore": 3778.3359831447438,
+      "grid_edge": "m_high",
+      "m": 5,
+      "k": 5
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "nat",
+      "n": 100000,
+      "predictor": "hybrid_zeroshot",
+      "dev_seen_geoscore": 4173.081784062152,
+      "dev_unseen_geoscore": 3811.4292706819474,
+      "grid_edge": "m_high",
+      "m": 5,
+      "k": 5
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "nat",
+      "n": 200000,
+      "predictor": "medoid",
+      "dev_seen_geoscore": 4165.798555630816,
+      "dev_unseen_geoscore": 3732.5760256836356,
+      "grid_edge": "",
+      "k": 10
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "nat",
+      "n": 200000,
+      "predictor": "cell_random",
+      "dev_seen_geoscore": 4224.564904428564,
+      "dev_unseen_geoscore": 3721.9000241268427,
+      "grid_edge": "never_stopped_early",
+      "lr": 0.003,
+      "epoch": 58,
+      "extra_lrs": [],
+      "dev_seen_top_cells_sha256": "a1c3240e637be3d3a785a4533c168fcdba3071be4510afd38ef2148ab200cdc6"
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "nat",
+      "n": 200000,
+      "predictor": "cell_zeroshot",
+      "dev_seen_geoscore": 4234.660885403353,
+      "dev_unseen_geoscore": 3775.913511027498,
+      "grid_edge": "",
+      "lr": 0.001,
+      "epoch": 45,
+      "extra_lrs": [
+        0.0003
+      ],
+      "dev_seen_top_cells_sha256": "28864a35412148b483eb8c12ce4a39f3afeb73ca67173110c0dd815eb4e573f6"
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "nat",
+      "n": 200000,
+      "predictor": "hybrid_random",
+      "dev_seen_geoscore": 4262.591559457878,
+      "dev_unseen_geoscore": 3800.766685708396,
+      "grid_edge": "m_high",
+      "m": 5,
+      "k": 5
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "nat",
+      "n": 200000,
+      "predictor": "hybrid_zeroshot",
+      "dev_seen_geoscore": 4263.2045887536915,
+      "dev_unseen_geoscore": 3808.8892861817903,
+      "grid_edge": "",
+      "m": 3,
+      "k": 5
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "nat",
+      "n": 500000,
+      "predictor": "medoid",
+      "dev_seen_geoscore": 4255.961464919965,
+      "dev_unseen_geoscore": 3762.907696051675,
+      "grid_edge": "",
+      "k": 10
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "nat",
+      "n": 500000,
+      "predictor": "cell_random",
+      "dev_seen_geoscore": 4309.376281747578,
+      "dev_unseen_geoscore": 3761.8239378285175,
+      "grid_edge": "lr_low;epoch_cap;never_stopped_early",
+      "lr": 0.001,
+      "epoch": 60,
+      "extra_lrs": [],
+      "dev_seen_top_cells_sha256": "5da8a0cd4b12a5b89df58c7b3fcea70c454e82443a1925d91f1fa21fcb1e080e"
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "nat",
+      "n": 500000,
+      "predictor": "cell_zeroshot",
+      "dev_seen_geoscore": 4312.570321989041,
+      "dev_unseen_geoscore": 3770.755449032635,
+      "grid_edge": "never_stopped_early",
+      "lr": 0.001,
+      "epoch": 59,
+      "extra_lrs": [
+        0.0003
+      ],
+      "dev_seen_top_cells_sha256": "65e731ed54187e5956ef49274a2522410d56247712da7092f9f14a29d6c08b29"
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "nat",
+      "n": 500000,
+      "predictor": "hybrid_random",
+      "dev_seen_geoscore": 4343.944909401726,
+      "dev_unseen_geoscore": 3776.9236619413473,
+      "grid_edge": "",
+      "m": 3,
+      "k": 1
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "nat",
+      "n": 500000,
+      "predictor": "hybrid_zeroshot",
+      "dev_seen_geoscore": 4350.707886893207,
+      "dev_unseen_geoscore": 3784.7538863597943,
+      "grid_edge": "",
+      "m": 3,
+      "k": 1
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "bal",
+      "n": 50000,
+      "predictor": "medoid",
+      "dev_seen_geoscore": 3608.4997783017834,
+      "dev_unseen_geoscore": 3315.338459993173,
+      "grid_edge": "",
+      "k": 5
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "bal",
+      "n": 50000,
+      "predictor": "cell_random",
+      "dev_seen_geoscore": 3303.084552001004,
+      "dev_unseen_geoscore": 3074.5125464571215,
+      "grid_edge": "lr_low;never_stopped_early",
+      "lr": 0.001,
+      "epoch": 56,
+      "extra_lrs": [],
+      "dev_seen_top_cells_sha256": "554b4a2bdabce5a5568d285236bed7194d56e97d2ec8be9cdf5a133075b80554"
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "bal",
+      "n": 50000,
+      "predictor": "cell_zeroshot",
+      "dev_seen_geoscore": 3586.33090420672,
+      "dev_unseen_geoscore": 3371.596352621725,
+      "grid_edge": "",
+      "lr": 0.001,
+      "epoch": 23,
+      "extra_lrs": [
+        0.0003
+      ],
+      "dev_seen_top_cells_sha256": "9b5704090222341e219def3255c01ca109048919a41f81465c86598f6429b781"
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "bal",
+      "n": 50000,
+      "predictor": "hybrid_random",
+      "dev_seen_geoscore": 3567.808857262578,
+      "dev_unseen_geoscore": 3264.175724698185,
+      "grid_edge": "m_high",
+      "m": 5,
+      "k": 1
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "bal",
+      "n": 50000,
+      "predictor": "hybrid_zeroshot",
+      "dev_seen_geoscore": 3692.1695069006,
+      "dev_unseen_geoscore": 3412.04609806528,
+      "grid_edge": "m_high",
+      "m": 5,
+      "k": 1
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "bal",
+      "n": 100000,
+      "predictor": "medoid",
+      "dev_seen_geoscore": 3767.234553721111,
+      "dev_unseen_geoscore": 3444.097190653595,
+      "grid_edge": "",
+      "k": 10
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "bal",
+      "n": 100000,
+      "predictor": "cell_random",
+      "dev_seen_geoscore": 3513.1472233454797,
+      "dev_unseen_geoscore": 3273.5659997535786,
+      "grid_edge": "lr_low;never_stopped_early",
+      "lr": 0.001,
+      "epoch": 56,
+      "extra_lrs": [],
+      "dev_seen_top_cells_sha256": "32113a9a60a30c0398872b425002ec10902c4a9ae18635320c73a6b80381ba44"
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "bal",
+      "n": 100000,
+      "predictor": "cell_zeroshot",
+      "dev_seen_geoscore": 3738.4035736918727,
+      "dev_unseen_geoscore": 3435.360483874358,
+      "grid_edge": "",
+      "lr": 0.001,
+      "epoch": 16,
+      "extra_lrs": [
+        0.0003
+      ],
+      "dev_seen_top_cells_sha256": "4a87ec8639a80f1bc460878b88d95ba9e11050ac83aa1cac0af427ddb94dc604"
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "bal",
+      "n": 100000,
+      "predictor": "hybrid_random",
+      "dev_seen_geoscore": 3735.3904144574617,
+      "dev_unseen_geoscore": 3402.3952120751096,
+      "grid_edge": "m_high",
+      "m": 5,
+      "k": 1
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "bal",
+      "n": 100000,
+      "predictor": "hybrid_zeroshot",
+      "dev_seen_geoscore": 3821.09660881626,
+      "dev_unseen_geoscore": 3501.258034152336,
+      "grid_edge": "m_high",
+      "m": 5,
+      "k": 1
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "bal",
+      "n": 200000,
+      "predictor": "medoid",
+      "dev_seen_geoscore": 3902.7291324305984,
+      "dev_unseen_geoscore": 3482.3344878273124,
+      "grid_edge": "",
+      "k": 10
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "bal",
+      "n": 200000,
+      "predictor": "cell_random",
+      "dev_seen_geoscore": 3787.6986896997873,
+      "dev_unseen_geoscore": 3435.8862708413244,
+      "grid_edge": "lr_low",
+      "lr": 0.001,
+      "epoch": 44,
+      "extra_lrs": [],
+      "dev_seen_top_cells_sha256": "72d15ca1cd1265bf24b013dcdee08c55c7cba250bb7206bf309af1747a3fc62c"
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "bal",
+      "n": 200000,
+      "predictor": "cell_zeroshot",
+      "dev_seen_geoscore": 3871.4593100900174,
+      "dev_unseen_geoscore": 3487.9171558013113,
+      "grid_edge": "lr_low;never_stopped_early",
+      "lr": 0.0003,
+      "epoch": 56,
+      "extra_lrs": [
+        0.0003
+      ],
+      "dev_seen_top_cells_sha256": "abadfe794eb96161adbbdca74f3178917affab366bcaad3e8ba0ef30e34a5e92"
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "bal",
+      "n": 200000,
+      "predictor": "hybrid_random",
+      "dev_seen_geoscore": 3922.3544905961653,
+      "dev_unseen_geoscore": 3501.7409046797693,
+      "grid_edge": "m_high",
+      "m": 5,
+      "k": 1
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "bal",
+      "n": 200000,
+      "predictor": "hybrid_zeroshot",
+      "dev_seen_geoscore": 3943.9535406684918,
+      "dev_unseen_geoscore": 3531.6042556643492,
+      "grid_edge": "m_high",
+      "m": 5,
+      "k": 1
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "bal",
+      "n": 500000,
+      "predictor": "medoid",
+      "dev_seen_geoscore": 4077.6944458716916,
+      "dev_unseen_geoscore": 3591.547604769501,
+      "grid_edge": "",
+      "k": 10
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "bal",
+      "n": 500000,
+      "predictor": "cell_random",
+      "dev_seen_geoscore": 4087.3283544607393,
+      "dev_unseen_geoscore": 3581.565795762469,
+      "grid_edge": "",
+      "lr": 0.01,
+      "epoch": 48,
+      "extra_lrs": [],
+      "dev_seen_top_cells_sha256": "e9ef02595c83e837da0c769ac704aaf6c9607db435053900dbd292b583ce7dab"
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "bal",
+      "n": 500000,
+      "predictor": "cell_zeroshot",
+      "dev_seen_geoscore": 4093.6465742504115,
+      "dev_unseen_geoscore": 3637.8494854726955,
+      "grid_edge": "never_stopped_early",
+      "lr": 0.001,
+      "epoch": 59,
+      "extra_lrs": [
+        0.0003
+      ],
+      "dev_seen_top_cells_sha256": "11268be1480562286ae807e0ee4c4d0ace43d929efaa0b59db28a456d2ea8489"
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "bal",
+      "n": 500000,
+      "predictor": "hybrid_random",
+      "dev_seen_geoscore": 4143.6515029444145,
+      "dev_unseen_geoscore": 3635.6701754879823,
+      "grid_edge": "",
+      "m": 3,
+      "k": 1
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "bal",
+      "n": 500000,
+      "predictor": "hybrid_zeroshot",
+      "dev_seen_geoscore": 4149.763990402562,
+      "dev_unseen_geoscore": 3655.6038780253657,
+      "grid_edge": "",
+      "m": 3,
+      "k": 1
+    },
+    {
+      "backbone": "clip_l14_336",
+      "ordering": "nat",
+      "n": 50000,
+      "predictor": "medoid",
+      "dev_seen_geoscore": 3965.641617935208,
+      "dev_unseen_geoscore": 3544.391818439243,
+      "grid_edge": "",
+      "k": 10
+    },
+    {
+      "backbone": "clip_l14_336",
+      "ordering": "nat",
+      "n": 50000,
+      "predictor": "cell_random",
+      "dev_seen_geoscore": 3949.0241375916867,
+      "dev_unseen_geoscore": 3591.311098556471,
+      "grid_edge": "lr_low;never_stopped_early",
+      "lr": 0.001,
+      "epoch": 59,
+      "extra_lrs": [],
+      "dev_seen_top_cells_sha256": "644d592da9d6e5f7d514c9fccfb1065c2ebd016bfedbe01f12b3d9a58f5480bb"
+    },
+    {
+      "backbone": "clip_l14_336",
+      "ordering": "nat",
+      "n": 50000,
+      "predictor": "cell_zeroshot",
+      "dev_seen_geoscore": 4044.0412389759995,
+      "dev_unseen_geoscore": 3724.1283185686193,
+      "grid_edge": "lr_low;never_stopped_early",
+      "lr": 0.0003,
+      "epoch": 56,
+      "extra_lrs": [
+        0.0003
+      ],
+      "dev_seen_top_cells_sha256": "4f483823c55651131d238a5e919df7d84270de51e27b981941052ddbd3d32d77"
+    },
+    {
+      "backbone": "clip_l14_336",
+      "ordering": "nat",
+      "n": 50000,
+      "predictor": "hybrid_random",
+      "dev_seen_geoscore": 4037.882639307211,
+      "dev_unseen_geoscore": 3675.318223968677,
+      "grid_edge": "m_high",
+      "m": 5,
+      "k": 5
+    },
+    {
+      "backbone": "clip_l14_336",
+      "ordering": "nat",
+      "n": 50000,
+      "predictor": "hybrid_zeroshot",
+      "dev_seen_geoscore": 4072.917558103495,
+      "dev_unseen_geoscore": 3737.7944630612033,
+      "grid_edge": "m_high",
+      "m": 5,
+      "k": 5
+    },
+    {
+      "backbone": "clip_l14_336",
+      "ordering": "nat",
+      "n": 100000,
+      "predictor": "medoid",
+      "dev_seen_geoscore": 4045.304162487524,
+      "dev_unseen_geoscore": 3591.276029308506,
+      "grid_edge": "",
+      "k": 10
+    },
+    {
+      "backbone": "clip_l14_336",
+      "ordering": "nat",
+      "n": 100000,
+      "predictor": "cell_random",
+      "dev_seen_geoscore": 4072.526229077095,
+      "dev_unseen_geoscore": 3628.3743406519748,
+      "grid_edge": "",
+      "lr": 0.003,
+      "epoch": 40,
+      "extra_lrs": [],
+      "dev_seen_top_cells_sha256": "e33e228a0dbc34df6cc2b9dbdcaa687af08c0dc0193447451403faa686267d3c"
+    },
+    {
+      "backbone": "clip_l14_336",
+      "ordering": "nat",
+      "n": 100000,
+      "predictor": "cell_zeroshot",
+      "dev_seen_geoscore": 4125.55520046502,
+      "dev_unseen_geoscore": 3724.580803841636,
+      "grid_edge": "lr_low;never_stopped_early",
+      "lr": 0.0003,
+      "epoch": 57,
+      "extra_lrs": [
+        0.0003
+      ],
+      "dev_seen_top_cells_sha256": "0ed4d92cb0e766275adba3ccf9aa47d969b5b1e69e89a7a945175b7cb54d40d0"
+    },
+    {
+      "backbone": "clip_l14_336",
+      "ordering": "nat",
+      "n": 100000,
+      "predictor": "hybrid_random",
+      "dev_seen_geoscore": 4148.562728476489,
+      "dev_unseen_geoscore": 3706.5442120140856,
+      "grid_edge": "m_high",
+      "m": 5,
+      "k": 5
+    },
+    {
+      "backbone": "clip_l14_336",
+      "ordering": "nat",
+      "n": 100000,
+      "predictor": "hybrid_zeroshot",
+      "dev_seen_geoscore": 4151.092600087566,
+      "dev_unseen_geoscore": 3762.3079239937315,
+      "grid_edge": "m_high",
+      "m": 5,
+      "k": 5
+    },
+    {
+      "backbone": "clip_l14_336",
+      "ordering": "nat",
+      "n": 200000,
+      "predictor": "medoid",
+      "dev_seen_geoscore": 4127.160593386405,
+      "dev_unseen_geoscore": 3601.737093489922,
+      "grid_edge": "",
+      "k": 5
+    },
+    {
+      "backbone": "clip_l14_336",
+      "ordering": "nat",
+      "n": 200000,
+      "predictor": "cell_random",
+      "dev_seen_geoscore": 4181.0256246313775,
+      "dev_unseen_geoscore": 3676.1432392640813,
+      "grid_edge": "",
+      "lr": 0.003,
+      "epoch": 34,
+      "extra_lrs": [],
+      "dev_seen_top_cells_sha256": "92b80ad2b036c0bf439ce5bc90400678c7c2a4bf8c1b09173ccd1f50fad74031"
+    },
+    {
+      "backbone": "clip_l14_336",
+      "ordering": "nat",
+      "n": 200000,
+      "predictor": "cell_zeroshot",
+      "dev_seen_geoscore": 4208.355268806361,
+      "dev_unseen_geoscore": 3747.4060650437877,
+      "grid_edge": "lr_low;never_stopped_early",
+      "lr": 0.0003,
+      "epoch": 55,
+      "extra_lrs": [
+        0.0003
+      ],
+      "dev_seen_top_cells_sha256": "08dc1a0f94b20de3850201fa9e51c4059e5c53b76c65a75e4d6d703b6bc65c37"
+    },
+    {
+      "backbone": "clip_l14_336",
+      "ordering": "nat",
+      "n": 200000,
+      "predictor": "hybrid_random",
+      "dev_seen_geoscore": 4235.401712193787,
+      "dev_unseen_geoscore": 3743.515756443768,
+      "grid_edge": "m_high",
+      "m": 5,
+      "k": 5
+    },
+    {
+      "backbone": "clip_l14_336",
+      "ordering": "nat",
+      "n": 200000,
+      "predictor": "hybrid_zeroshot",
+      "dev_seen_geoscore": 4227.733414857276,
+      "dev_unseen_geoscore": 3731.2650276518993,
+      "grid_edge": "",
+      "m": 3,
+      "k": 1
+    },
+    {
+      "backbone": "clip_l14_336",
+      "ordering": "nat",
+      "n": 500000,
+      "predictor": "medoid",
+      "dev_seen_geoscore": 4224.643631102844,
+      "dev_unseen_geoscore": 3680.81075575324,
+      "grid_edge": "",
+      "k": 10
+    },
+    {
+      "backbone": "clip_l14_336",
+      "ordering": "nat",
+      "n": 500000,
+      "predictor": "cell_random",
+      "dev_seen_geoscore": 4286.363491186147,
+      "dev_unseen_geoscore": 3717.3133076230256,
+      "grid_edge": "",
+      "lr": 0.003,
+      "epoch": 47,
+      "extra_lrs": [],
+      "dev_seen_top_cells_sha256": "77f6450ffb968fe87b7dbd0479990faf20d154d3e824ae7c100feaaad3b22d7a"
+    },
+    {
+      "backbone": "clip_l14_336",
+      "ordering": "nat",
+      "n": 500000,
+      "predictor": "cell_zeroshot",
+      "dev_seen_geoscore": 4294.893062354967,
+      "dev_unseen_geoscore": 3752.707495487309,
+      "grid_edge": "lr_low;epoch_cap;never_stopped_early",
+      "lr": 0.0003,
+      "epoch": 60,
+      "extra_lrs": [
+        0.0003
+      ],
+      "dev_seen_top_cells_sha256": "68e5a4d58cfe999d12a990b5416d52b648889d4e7ae1c39ff70ba3a73614222b"
+    },
+    {
+      "backbone": "clip_l14_336",
+      "ordering": "nat",
+      "n": 500000,
+      "predictor": "hybrid_random",
+      "dev_seen_geoscore": 4326.446300804671,
+      "dev_unseen_geoscore": 3772.950564085785,
+      "grid_edge": "m_high",
+      "m": 5,
+      "k": 5
+    },
+    {
+      "backbone": "clip_l14_336",
+      "ordering": "nat",
+      "n": 500000,
+      "predictor": "hybrid_zeroshot",
+      "dev_seen_geoscore": 4322.240745871944,
+      "dev_unseen_geoscore": 3779.763926582595,
+      "grid_edge": "",
+      "m": 3,
+      "k": 5
+    },
+    {
+      "backbone": "clip_l14_336",
+      "ordering": "bal",
+      "n": 50000,
+      "predictor": "medoid",
+      "dev_seen_geoscore": 3473.416133760691,
+      "dev_unseen_geoscore": 3125.867604466269,
+      "grid_edge": "",
+      "k": 5
+    },
+    {
+      "backbone": "clip_l14_336",
+      "ordering": "bal",
+      "n": 50000,
+      "predictor": "cell_random",
+      "dev_seen_geoscore": 3102.3808488797167,
+      "dev_unseen_geoscore": 2889.6859227794425,
+      "grid_edge": "",
+      "lr": 0.003,
+      "epoch": 24,
+      "extra_lrs": [],
+      "dev_seen_top_cells_sha256": "3447863b5fec8edeb461bb1446dea8b849743986c194cfeac70e4592885e0150"
+    },
+    {
+      "backbone": "clip_l14_336",
+      "ordering": "bal",
+      "n": 50000,
+      "predictor": "cell_zeroshot",
+      "dev_seen_geoscore": 3447.2150473964366,
+      "dev_unseen_geoscore": 3215.3809079776083,
+      "grid_edge": "",
+      "lr": 0.001,
+      "epoch": 20,
+      "extra_lrs": [
+        0.0003
+      ],
+      "dev_seen_top_cells_sha256": "2bfc08cbc4367edb3d2afffe0d2f41622c20020e7759552aa8f93fd9ff4d08f3"
+    },
+    {
+      "backbone": "clip_l14_336",
+      "ordering": "bal",
+      "n": 50000,
+      "predictor": "hybrid_random",
+      "dev_seen_geoscore": 3406.921994173584,
+      "dev_unseen_geoscore": 3075.7186710613882,
+      "grid_edge": "m_high",
+      "m": 5,
+      "k": 1
+    },
+    {
+      "backbone": "clip_l14_336",
+      "ordering": "bal",
+      "n": 50000,
+      "predictor": "hybrid_zeroshot",
+      "dev_seen_geoscore": 3578.9237858030783,
+      "dev_unseen_geoscore": 3264.725133362605,
+      "grid_edge": "m_high",
+      "m": 5,
+      "k": 1
+    },
+    {
+      "backbone": "clip_l14_336",
+      "ordering": "bal",
+      "n": 100000,
+      "predictor": "medoid",
+      "dev_seen_geoscore": 3658.7435595946363,
+      "dev_unseen_geoscore": 3258.3198823577486,
+      "grid_edge": "",
+      "k": 5
+    },
+    {
+      "backbone": "clip_l14_336",
+      "ordering": "bal",
+      "n": 100000,
+      "predictor": "cell_random",
+      "dev_seen_geoscore": 3339.9155792471965,
+      "dev_unseen_geoscore": 3135.3353529512137,
+      "grid_edge": "",
+      "lr": 0.003,
+      "epoch": 27,
+      "extra_lrs": [],
+      "dev_seen_top_cells_sha256": "ac8429522f4cf3e604dd56aebae0009e1d31443669d4041aa4d20c1709034076"
+    },
+    {
+      "backbone": "clip_l14_336",
+      "ordering": "bal",
+      "n": 100000,
+      "predictor": "cell_zeroshot",
+      "dev_seen_geoscore": 3625.658618574992,
+      "dev_unseen_geoscore": 3356.2230042926485,
+      "grid_edge": "",
+      "lr": 0.001,
+      "epoch": 16,
+      "extra_lrs": [
+        0.0003
+      ],
+      "dev_seen_top_cells_sha256": "e0e801aab3adf314e0a3ad70fbda9877fe756b703fbe76a6b681b1b79461a44e"
+    },
+    {
+      "backbone": "clip_l14_336",
+      "ordering": "bal",
+      "n": 100000,
+      "predictor": "hybrid_random",
+      "dev_seen_geoscore": 3629.2140239782407,
+      "dev_unseen_geoscore": 3273.3286202810104,
+      "grid_edge": "m_high",
+      "m": 5,
+      "k": 1
+    },
+    {
+      "backbone": "clip_l14_336",
+      "ordering": "bal",
+      "n": 100000,
+      "predictor": "hybrid_zeroshot",
+      "dev_seen_geoscore": 3738.2717463367617,
+      "dev_unseen_geoscore": 3401.8225735551664,
+      "grid_edge": "m_high",
+      "m": 5,
+      "k": 1
+    },
+    {
+      "backbone": "clip_l14_336",
+      "ordering": "bal",
+      "n": 200000,
+      "predictor": "medoid",
+      "dev_seen_geoscore": 3816.596639695456,
+      "dev_unseen_geoscore": 3316.436018186068,
+      "grid_edge": "",
+      "k": 5
+    },
+    {
+      "backbone": "clip_l14_336",
+      "ordering": "bal",
+      "n": 200000,
+      "predictor": "cell_random",
+      "dev_seen_geoscore": 3652.074383076925,
+      "dev_unseen_geoscore": 3338.4608294413315,
+      "grid_edge": "lr_low",
+      "lr": 0.001,
+      "epoch": 51,
+      "extra_lrs": [],
+      "dev_seen_top_cells_sha256": "21f9f4424d1e99c3195161376f7efad7eba64c2d5a3717367d57023bcb627117"
+    },
+    {
+      "backbone": "clip_l14_336",
+      "ordering": "bal",
+      "n": 200000,
+      "predictor": "cell_zeroshot",
+      "dev_seen_geoscore": 3802.5772109847253,
+      "dev_unseen_geoscore": 3443.0767140603357,
+      "grid_edge": "lr_low",
+      "lr": 0.0003,
+      "epoch": 44,
+      "extra_lrs": [
+        0.0003
+      ],
+      "dev_seen_top_cells_sha256": "4a4e007586b26722898df1bcecbeea2c83cfdf2b87eb38291a6304aa32ba3d41"
+    },
+    {
+      "backbone": "clip_l14_336",
+      "ordering": "bal",
+      "n": 200000,
+      "predictor": "hybrid_random",
+      "dev_seen_geoscore": 3853.91287974442,
+      "dev_unseen_geoscore": 3408.1338632227644,
+      "grid_edge": "m_high",
+      "m": 5,
+      "k": 1
+    },
+    {
+      "backbone": "clip_l14_336",
+      "ordering": "bal",
+      "n": 200000,
+      "predictor": "hybrid_zeroshot",
+      "dev_seen_geoscore": 3888.1042535957686,
+      "dev_unseen_geoscore": 3468.553076890105,
+      "grid_edge": "m_high",
+      "m": 5,
+      "k": 1
+    },
+    {
+      "backbone": "clip_l14_336",
+      "ordering": "bal",
+      "n": 500000,
+      "predictor": "medoid",
+      "dev_seen_geoscore": 4013.351703722043,
+      "dev_unseen_geoscore": 3448.121078894765,
+      "grid_edge": "",
+      "k": 5
+    },
+    {
+      "backbone": "clip_l14_336",
+      "ordering": "bal",
+      "n": 500000,
+      "predictor": "cell_random",
+      "dev_seen_geoscore": 4022.3145784686676,
+      "dev_unseen_geoscore": 3568.280730342906,
+      "grid_edge": "",
+      "lr": 0.003,
+      "epoch": 33,
+      "extra_lrs": [],
+      "dev_seen_top_cells_sha256": "aa3ad6b3f7a92552ef5dab1873bb403d7705e3760409d24bd91c805f5c28601d"
+    },
+    {
+      "backbone": "clip_l14_336",
+      "ordering": "bal",
+      "n": 500000,
+      "predictor": "cell_zeroshot",
+      "dev_seen_geoscore": 4044.000386080108,
+      "dev_unseen_geoscore": 3582.120505235194,
+      "grid_edge": "lr_low;never_stopped_early",
+      "lr": 0.0003,
+      "epoch": 57,
+      "extra_lrs": [
+        0.0003
+      ],
+      "dev_seen_top_cells_sha256": "a9690dc081d53b10c62924d85dede4a2c2f56f070cd793f6f92916d99bb5f2f8"
+    },
+    {
+      "backbone": "clip_l14_336",
+      "ordering": "bal",
+      "n": 500000,
+      "predictor": "hybrid_random",
+      "dev_seen_geoscore": 4104.732274948248,
+      "dev_unseen_geoscore": 3590.4066610606856,
+      "grid_edge": "",
+      "m": 3,
+      "k": 1
+    },
+    {
+      "backbone": "clip_l14_336",
+      "ordering": "bal",
+      "n": 500000,
+      "predictor": "hybrid_zeroshot",
+      "dev_seen_geoscore": 4113.832704610651,
+      "dev_unseen_geoscore": 3608.4065514713243,
+      "grid_edge": "",
+      "m": 3,
+      "k": 1
+    }
+  ]
+}
