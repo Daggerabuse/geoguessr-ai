@@ -1,6 +1,8 @@
 """Phase 3 coordinate runner on synthetic embeddings (no model, no Kaggle)."""
 
 import json
+import shutil
+import sys
 
 import numpy as np
 import pandas as pd
@@ -75,8 +77,8 @@ def test_grid_outputs_selection_on_dev_seen_and_no_test(setup, monkeypatch):  # 
                         or real_choose(pred, nb, sel, *a))
     table = p3.run(p3_args(tmp_path))
     out = tmp_path / "p3"
-    assert len(table) == 3 * 2 * 2 * 3  # backbones x orderings x sizes x predictors
-    assert set(table["variant"]) == {"geo_top1", "geo_mean", "geo_medoid"}
+    assert len(table) == 3 * 2 * 2 * 7  # backbones x orderings x sizes x (predictors + baselines)
+    assert set(table["variant"]) == {f"geo_{p}" for p in (*p3.PREDICTORS, *p3.BASELINES)}
     assert not any(c.startswith("test_") for c in table.columns)
     dev_seen_n = len(real_read(tmp_path / "v2" / "dev_seen.csv"))
     assert set(chosen_on) == {dev_seen_n}
@@ -86,7 +88,7 @@ def test_grid_outputs_selection_on_dev_seen_and_no_test(setup, monkeypatch):  # 
     assert (table[table["predictor"] == "top1"]["k"] == 1).all()
     for m in p3.GAP_METRICS:
         gp = pd.read_csv(out / f"gaps_{m}.csv")
-        assert set(gp["split"]) == {"dev_seen", "dev_unseen"} and len(gp) == 2 * 2 * 3 * 2
+        assert set(gp["split"]) == {"dev_seen", "dev_unseen"} and len(gp) == 2 * 2 * 5 * 2
         assert (out / f"shrink_{m}.csv").exists()
     mg = pd.read_csv(out / "gaps_median_km.csv")
     assert ((mg["gap_lo"] <= mg["gap"] + 1e-9) & (mg["gap"] <= mg["gap_hi"] + 1e-9)).all()
@@ -100,7 +102,7 @@ def test_grid_outputs_selection_on_dev_seen_and_no_test(setup, monkeypatch):  # 
 def test_medoid_reproduces_phase1_knn_coordinates(setup, capsys):  # noqa: F811
     tmp_path, args = setup
     pe.run(pe.parse_args([*args, "--methods", "knn"]))
-    table = p3.run(p3_args(tmp_path, "--compare-phase1", str(tmp_path / "res")))
+    table = p3.run(p3_args(tmp_path, "--phase1-dev", str(tmp_path / "res"), "--mask-km", "0"))
     assert "max abs difference 0.000000" in capsys.readouterr().out
     med = table[table["predictor"] == "medoid"]
     for _, r in med.iterrows():
@@ -147,3 +149,493 @@ def test_gaps_defaults_unchanged_and_median_gap_is_paired(tmp_path):
     assert r["gap_lo"] == pytest.approx(-10.0) and r["gap_hi"] == pytest.approx(-10.0)
     km = pe.paired_gap(a, b, clusters, 100, 1, "km")
     assert km["gap"] == pytest.approx(-10.0) and km["gap_lo"] == pytest.approx(-10.0)
+
+
+# ----------------------------------------------------------------- masking, numerics, baselines
+
+
+def test_mask_never_retrieves_an_identical_location_image():
+    rng = np.random.default_rng(0)
+    db = rng.normal(size=(50, 8)).astype(np.float32)
+    db /= np.linalg.norm(db, axis=1, keepdims=True)
+    q = db[[0, 1]].copy()  # same image as db 0 / db 1 (embedding and location)
+    dbm = pd.DataFrame({"id": [f"d{i}" for i in range(50)], "latitude": rng.uniform(-60, 60, 50),
+                        "longitude": rng.uniform(-170, 170, 50)})
+    dbm.loc[2, ["latitude", "longitude"]] = dbm.loc[0, ["latitude", "longitude"]] + [0.005, 0]  # ~0.6 km
+    qm = dbm.iloc[[0, 1]].assign(id=["q0", "q1"]).reset_index(drop=True)
+    for dtype in ("fp32", "fp16"):
+        qi, di, near = p3.geo_mask(qm, dbm, 1.0)
+        _, idx = g.knn(q, db, 10, dtype=dtype, exclude=(qi, di))
+        assert 0 not in idx[0] and 2 not in idx[0] and 1 not in idx[1]
+        assert sorted(zip(qi.tolist(), di.tolist())) == [(0, 0), (0, 2), (1, 1)]
+        assert near[0] not in (0, 2) and near[1] != 1
+    qi, di, _ = p3.geo_mask(qm, dbm, 0.0)
+    assert len(qi) == 0 and g.knn(q, db, 1, exclude=(qi, di))[1][:, 0].tolist() == [0, 1]
+
+
+def test_numpy_fp16_rounds_scores_like_the_gpu_path():
+    q = np.array([[1.0, 0.0]], dtype=np.float32)
+    db = np.array([[0.99995, 0.01], [0.99990, 0.0141]], dtype=np.float32)
+    s32 = g.knn(q, db, 2, dtype="fp32")[0]
+    s16 = g.knn(q, db, 2, dtype="fp16")[0]
+    assert s32[0, 0] != s32[0, 1] and s16[0, 0] == s16[0, 1]  # fp16 cannot tell them apart
+
+
+def test_cache_key_covers_data_embeddings_and_settings(setup):  # noqa: F811
+    tmp_path, _ = setup
+    data, emb = tmp_path / "v2", tmp_path / "emb" / "streetclip"
+    base = p3.cache_key(p3.cache_settings(p3_args(tmp_path), data, emb))
+    for extra in (["--mask-km", "2"], ["--knn-dtype", "fp16"], ["--k", "1", "10"],
+                  ["--seed", "1"], ["--phase1-dev", "x"]):
+        assert p3.cache_key(p3.cache_settings(p3_args(tmp_path, *extra), data, emb)) != base
+    (data / "config.json").write_text("{}")
+    with_cfg = p3.cache_key(p3.cache_settings(p3_args(tmp_path), data, emb))
+    assert with_cfg != base
+    e.save_npz(emb / "train_01_y.npz", ["zz"], np.ones((1, 8)), failed=[])
+    assert p3.cache_key(p3.cache_settings(p3_args(tmp_path), data, emb)) != with_cfg
+
+
+def test_changed_mask_reruns_every_subset(setup, monkeypatch):  # noqa: F811
+    tmp_path, _ = setup
+    p3.run(p3_args(tmp_path, "--backbones", "streetclip"))
+    calls = []
+    real = p3.run_subset
+    monkeypatch.setattr(p3, "run_subset", lambda *a: calls.append(a[1:3]) or real(*a))
+    p3.run(p3_args(tmp_path, "--backbones", "streetclip"))
+    assert calls == []
+    table = p3.run(p3_args(tmp_path, "--backbones", "streetclip", "--mask-km", "200"))
+    assert len(calls) == 4
+    assert (table["mask_km"] == 200).all() and (table["knn_dtype"] == "fp32").all()
+    assert (table["knn_device"] == "cpu").all() and (table["dev_seen_masked_mean"] > 0).all()
+
+
+def test_baselines(setup):  # noqa: F811
+    tmp_path, _ = setup
+    res = tmp_path / "res"
+    for bb in pe.BACKBONES:  # a fake Phase 1 probe: always predicts the true country
+        for o in ("nat", "bal"):
+            for n in (30, 90):
+                d = res / bb / f"{o}_{n}_{p3.PROBE_VARIANT}"
+                d.mkdir(parents=True)
+                for s in ("dev_seen", "dev"):
+                    df = pd.read_csv(tmp_path / "v2" / f"{s}.csv", dtype={"id": str},
+                                     keep_default_na=False)
+                    df[["id", "country"]].rename(columns={"country": "pred"}) \
+                        .to_csv(d / f"{s}_predictions.csv", index=False)
+    table = p3.run(p3_args(tmp_path, "--phase1-dev", str(res), "--mask-km", "2"))
+    out = tmp_path / "p3"
+
+    def hits(bb, pred, s="dev_seen"):
+        return pd.read_csv(out / bb / f"nat_90_geo_{pred}" / f"{s}_geo_hits.csv", dtype={"id": str})
+
+    const = hits("streetclip", "constant")
+    assert const["pred_lat"].nunique() == 1 and const["pred_lon"].nunique() == 1
+    pd.testing.assert_frame_equal(const, hits("clip_b16", "constant"))  # backbone-independent
+    oracle = hits("streetclip", "oracle")
+    assert (oracle["km"] > 2).all()  # the masked radius is never the answer
+    for pred in ("top1", "medoid", "bestk"):  # db points among the unmasked: oracle is a bound
+        assert (oracle["km"] <= hits("streetclip", pred)["km"] + 1e-9).all()
+    assert (hits("streetclip", "bestk")["km"] <= hits("streetclip", "top1")["km"] + 1e-9).all()
+    cent = hits("streetclip", "centroid")
+    assert cent["country_top1"].all()  # the fake probe is always right
+    m = json.loads((out / "streetclip" / "nat_90_geo_centroid" / "geo_metrics.json").read_text())
+    assert m["country_source"]["dev_seen"].startswith(p3.PROBE_VARIANT)
+    gp = pd.read_csv(out / "gaps_geoscore.csv")
+    assert not set(gp["variant"]) & {"geo_constant", "geo_oracle"}
+    assert {"geo_centroid", "geo_bestk"} <= set(gp["variant"])
+    assert table[table["predictor"] == "oracle"]["k"].isna().all()
+
+
+# ----------------------------------------------------------------- Step 2: geocells
+
+
+def test_majority_country_ties_and_empty_cells():
+    cells, labels = np.array([0, 0, 1, 1, 1]), np.array([3, 2, 1, 1, 0])
+    cent = np.array([[0.0, 0.0], [0.0, 0.0], [-40.0, 100.0]])
+    lat, lon = np.array([0, 0, 0, 0, -41.0]), np.array([0, 0, 0, 0, 101.0])
+    assert p3.majority_country(cells, labels, 3, cent, lat, lon).tolist() == [2, 1, 0]
+
+
+def test_majority_country_empty_cell_skips_unlabelled_images():
+    cells, labels = np.array([0, 0, 0]), np.array([4, -1, 2])
+    cent = np.array([[0.0, 0.0], [50.0, 50.0]])  # cell 1: nearest image is the unlabelled one
+    lat, lon = np.array([0.0, 50.1, 30.0]), np.array([0.0, 50.0, 30.0])
+    out = p3.majority_country(cells, labels, 2, cent, lat, lon)
+    assert out.tolist() == [2, 2] and (out >= 0).all()  # cell 0: tie 4/2 -> 2 (the -1 is ignored)
+    with pytest.raises(ValueError, match="label >= 0"):
+        p3.majority_country(cells, np.full(3, -1), 2, cent, lat, lon)
+
+
+def test_pick_cell_target_uses_only_the_pair_average_on_dev_seen():
+    rows = pd.DataFrame([
+        {"backbone": "streetclip", "cell_target": 1000, "dev_seen_geoscore": 3000, "dev_unseen_geoscore": 0},
+        {"backbone": "clip_l14_336", "cell_target": 1000, "dev_seen_geoscore": 2000, "dev_unseen_geoscore": 0},
+        {"backbone": "streetclip", "cell_target": 2000, "dev_seen_geoscore": 2600, "dev_unseen_geoscore": 9e9},
+        {"backbone": "clip_l14_336", "cell_target": 2000, "dev_seen_geoscore": 2300, "dev_unseen_geoscore": 9e9},
+        {"backbone": "clip_b16", "cell_target": 2000, "dev_seen_geoscore": 9e9, "dev_unseen_geoscore": 9e9}])
+    target, avg = p3.pick_cell_target(rows)
+    assert target == 1000 and avg == {1000: 2500.0, 2000: 2450.0}  # not streetclip's or b16's best
+
+
+def test_hybrid_keeps_neighbours_in_the_top_cells_or_falls_back():
+    lat, lon = np.array([0.0, 0.0, 0.1, 20.0, 20.1]), np.array([0.0, 0.1, 0.0, 20.0, 20.0])
+    db_cells = np.array([0, 0, 0, 1, 1])
+    cent = np.array([[0.05, 0.05], [20.05, 20.0], [-30.0, -30.0]])
+    sims = np.array([[0.9, 0.8, 0.7, 0.6, 0.5], [0.9, 0.8, 0.7, 0.6, 0.5]])
+    idx = np.array([[3, 0, 4, 1, 2], [0, 1, 2, 3, 4]])
+    top = np.array([[1, 2], [2, 0]])  # query 1: its top cell (2) holds no neighbour
+    for pred, tau in (("medoid", None), ("mean", 0.1)):
+        (la, lo), fb = p3.hybrid_coords((sims, idx), db_cells, top, 1, pred, 3, tau, lat, lon, cent)
+        assert fb.tolist() == [False, True]
+        assert (la[1], lo[1]) == (-30.0, -30.0)  # fallback: the top cell's centroid
+        assert la[0] == pytest.approx(20.0, abs=0.2) and lo[0] == pytest.approx(20.0, abs=0.2)
+    (la, lo), fb = p3.hybrid_coords((sims, idx), db_cells, top, 2, "medoid", 5, None, lat, lon, cent)
+    assert not fb.any() and la[1] < 1  # m = 2: cell 0 counts too; cell 1 never does
+
+
+def test_cell_and_hybrid_grid(setup, monkeypatch):  # noqa: F811
+    tmp_path, _ = setup
+    dev_seen_n = len(pd.read_csv(tmp_path / "v2" / "dev_seen.csv"))
+    probe_calls, hybrid_sel = [], []
+    real_probe, real_choose = g.probe_logits, p3.choose_hybrid
+
+    def spy_probe(feats, labels, dev_feats, dev_labels, eval_feats, head_init, a, device):
+        probe_calls.append((len(dev_feats), np.asarray(labels).copy(), head_init.clone()))
+        return real_probe(feats, labels, dev_feats, dev_labels, eval_feats, head_init, a, device)
+
+    majority = []
+    real_major = p3.majority_country
+    monkeypatch.setattr(p3, "majority_country",
+                        lambda *a: majority.append(real_major(*a)) or majority[-1])
+    monkeypatch.setattr(g, "probe_logits", spy_probe)
+    monkeypatch.setattr(p3, "choose_hybrid", lambda nb, dbc, top, sel, *a: hybrid_sel.append(len(sel))
+                        or real_choose(nb, dbc, top, sel, *a))
+    monkeypatch.setattr(p3, "SELECT_N", 90)  # the selection N on the tiny data
+    args = ["--methods", "cell", "hybrid", "--cell-targets", "4", "8", "--probe-epochs", "3",
+            "--probe-lrs", "0.01", "0.1", "--mask-km", "20", "--k", "1", "5"]
+    table = p3.run(p3_args(tmp_path, *args))
+    out = tmp_path / "p3"
+    choice = json.loads((out / "cell_count.json").read_text())
+    assert choice["target"] in (4, 8) and choice["backbones"] == list(pe.PAIR)
+    assert set(probe_calls_n := {c[0] for c in probe_calls}) == {dev_seen_n}, probe_calls_n
+    assert set(hybrid_sel) == {dev_seen_n}
+    # selection: PAIR x 2 targets x the random init only x 2 lrs; main grid: 3 bb x 4 subsets x
+    # 2 inits x 2 lrs minus the copied selection cells (PAIR x nat 90 x random x 2 lrs), plus
+    # the zero-shot EXTRA_LRS
+    extra = len(p3.EXTRA_LRS.get("zeroshot", ()))
+    assert len(probe_calls) == 2 * 2 * 2 + 3 * 4 * 2 * 2 - 2 * 2 + 3 * 4 * extra
+    assert not list((out / "cell_select").glob("*/*/*zeroshot*"))
+    assert choice["probe_init"] == "random"
+    assert set(table["variant"]) == {"geo_cell_random", "geo_cell_zeroshot", "geo_hybrid_random",
+                                     "geo_hybrid_zeroshot"}
+    assert (table["cell_target"] == choice["target"]).all()
+    assert table[table["predictor"] == "cell_random"]["lr"].isin([0.01, 0.1]).all()
+    assert table[table["predictor"] == "cell_zeroshot"]["lr"].isin(
+        [0.01, 0.1, *p3.EXTRA_LRS.get("zeroshot", ())]).all()
+    gp = pd.read_csv(out / "gaps_geoscore.csv")
+    assert set(gp["variant"]) == set(table["variant"])
+    # zero-shot init: each cell's row = the text embedding of its majority country
+    text = g.text_head("m/x", json.loads((tmp_path / "v2" / "classes.json").read_text()), "")
+    heads = [c[2] for c in probe_calls]
+    assert len(majority) == 3 * 4  # one per zero-shot cell probe (the selection trains none)
+    for maj in majority:
+        assert sum(h.shape == text[maj].shape and np.allclose(h, text[maj]) for h in heads) >= 2
+    for d in (out / "streetclip").glob("*_geo_hybrid_*"):  # masking: a kept neighbour is > 20 km away
+        h = pd.read_csv(d / "dev_seen_geo_hits.csv")
+        assert (h["fallback"] == 0).any() and (h.loc[h["fallback"] == 0, "km"] > 20).all()
+    calls = len(probe_calls)
+    p3.run(p3_args(tmp_path, *args))  # everything cached: no probe trained again
+    assert len(probe_calls) == calls
+    rec = json.loads((out / "cell_count.json").read_text())
+    (out / "cell_count.json").write_text(json.dumps({**rec, "geocells_sha256": "0" * 64}))
+    with pytest.raises(SystemExit, match="geocell partition"):  # a resumed run checks the partition
+        p3.run(p3_args(tmp_path, *args))
+    assert len(probe_calls) == calls
+
+
+def test_extra_lrs_resume_only_their_init_and_keep_other_keys(setup, monkeypatch):  # noqa: F811
+    tmp_path, _ = setup
+    base = ["--backbones", "streetclip", "--orderings", "nat", "--sizes", "90", *CELL_ARGS]
+    d = tmp_path / "p3" / "streetclip"
+    row = lambda i: json.loads((d / f"nat_90_geo_cell_{i}" / "row.json").read_text())
+    gm = lambda i: json.loads((d / f"nat_90_geo_cell_{i}" / "geo_metrics.json").read_text())
+    monkeypatch.setattr(p3, "EXTRA_LRS", {})  # the base grid, as Step 2 ran it
+    p3.run(p3_args(tmp_path, *base, "--methods", "cell", "hybrid"))
+    old = {i: row(i)["cache_key"] for i in ("random", "zeroshot")}
+    assert old["random"] == old["zeroshot"]
+    files = {s: (d / "nat_90_geo_cell_zeroshot" / f"{s}_top_cells.csv").read_bytes()
+             for s in p3.SPLITS}
+    calls, hyb = [], []
+    real, real_h = g.probe_logits, p3.run_hybrid
+    monkeypatch.setattr(g, "probe_logits", lambda *a: calls.append(a[6].probe_lr) or real(*a))
+    monkeypatch.setattr(p3, "run_hybrid", lambda *a, **k: hyb.append(list(a[5])) or real_h(*a, **k))
+    monkeypatch.setattr(p3, "EXTRA_LRS", {"zeroshot": (0.01,)})
+    p3.run(p3_args(tmp_path, *base, "--methods", "cell", "hybrid"))
+    assert calls == [0.01]  # only the extra lr of the zero-shot cell is trained
+    assert row("random")["cache_key"] == old["random"] and row("zeroshot")["cache_key"] != old["zeroshot"]
+    z = gm("zeroshot")
+    assert [e["lr"] for e in z["sweep_dev_seen"]] == [0.01, 0.1] and z["reused_lrs"] == [0.1]
+    assert z["cache_settings"]["extra_lrs"] == [0.01] and "extra_lrs" not in gm("random")["cache_settings"]
+    gs = {e["lr"]: e["dev_seen_geoscore"] for e in z["sweep_dev_seen"]}
+    best = 0.01 if gs[0.01] > gs[0.1] else 0.1  # a tie keeps the stored choice
+    assert z["lr"] == best and z["prev_lr"] == 0.1
+    same = all((d / "nat_90_geo_cell_zeroshot" / f"{s}_top_cells.csv").read_bytes() == files[s]
+               for s in p3.SPLITS)
+    assert same == (best == 0.1)  # the stored choice's files stand unless the extra lr wins
+    assert hyb == [["zeroshot"]]  # the probe key changed: only the zero-shot hybrid reruns
+    p3.run(p3_args(tmp_path, *base, "--methods", "cell", "hybrid"))
+    assert calls == [0.01] and hyb == [["zeroshot"]]  # all cached now
+
+
+def test_a_winning_extra_lr_rewrites_the_cell_under_the_extended_key(setup, monkeypatch):  # noqa: F811
+    tmp_path, _ = setup
+    base = ["--backbones", "streetclip", "--orderings", "nat", "--sizes", "90", *CELL_ARGS,
+            "--probe-inits", "zeroshot", "--methods", "cell"]
+    d = tmp_path / "p3" / "streetclip" / "nat_90_geo_cell_zeroshot"
+    read = lambda f: json.loads((d / f).read_text())
+    monkeypatch.setattr(p3, "EXTRA_LRS", {})
+    p3.run(p3_args(tmp_path, *base))
+    old_row, old_gm = read("row.json"), read("geo_metrics.json")
+    old_hits = (d / "dev_seen_geo_hits.csv").read_bytes()
+    real, true_cells = g.probe_logits, {}
+
+    def winning(*a):  # the extra lr: the true dev_seen cell on top, so it must win
+        logits, hist = real(*a)
+        if a[6].probe_lr == 0.01:
+            lab = np.asarray(a[3])
+            true_cells["dev_seen"] = lab
+            logits["dev_seen"] = logits["dev_seen"].copy()
+            logits["dev_seen"][np.arange(len(lab)), lab] += 1e6
+        return logits, hist
+
+    monkeypatch.setattr(g, "probe_logits", winning)
+    monkeypatch.setattr(p3, "EXTRA_LRS", {"zeroshot": (0.01,)})
+    p3.run(p3_args(tmp_path, *base))
+    row, gm = read("row.json"), read("geo_metrics.json")
+    gs = {e["lr"]: e["dev_seen_geoscore"] for e in gm["sweep_dev_seen"]}
+    assert gs[0.01] > gs[0.1] == old_gm["sweep_dev_seen"][0]["dev_seen_geoscore"]
+    # merged sweep, the new choice and what it replaced
+    assert sorted(gs) == [0.01, 0.1] and gm["reused_lrs"] == [0.1]
+    assert gm["lr"] == row["lr"] == 0.01 and gm["prev_lr"] == 0.1
+    assert gm["prev_dev_seen_geoscore"] == gs[0.1]
+    # new top cells and scores were written
+    top = pd.read_csv(d / "dev_seen_top_cells.csv")
+    assert (top["c0"].to_numpy() == true_cells["dev_seen"]).all()
+    assert (d / "dev_seen_geo_hits.csv").read_bytes() != old_hits
+    assert row["dev_seen_geoscore"] == pytest.approx(gs[0.01])
+    assert row["dev_seen_geoscore"] > old_row["dev_seen_geoscore"]
+    # the row carries the extended key, computed independently of the run
+    cs = gm["cache_settings"]
+    ext = p3.cache_key(p3.cache_settings(p3_args(tmp_path, *base), tmp_path / "v2",
+                                         tmp_path / "emb" / "streetclip", "cell",
+                                         (cs["geocells_sha256"], cs["cell_target"]), "zeroshot"))
+    assert cs["extra_lrs"] == [0.01] and row["cache_key"] == ext != old_row["cache_key"]
+
+
+def test_a_recorded_partition_is_loaded_not_rebuilt(setup, monkeypatch):  # noqa: F811
+    from geoguessr_ai import geocells as gc
+
+    tmp_path, _ = setup
+    monkeypatch.setattr(p3, "SELECT_N", 90)
+    args = ["--orderings", "nat", "--sizes", "90", "--probe-inits", "random", "--cell-targets",
+            "4", "--probe-epochs", "2", "--probe-lrs", "0.1", "--mask-km", "20", "--k", "1", "5"]
+    out = tmp_path / "p3"
+    p3.run(p3_args(tmp_path, *args, "--methods", "cell"))
+    rec = json.loads((out / "cell_count.json").read_text())
+    f = out / "geocells" / f"cells_{rec['target']}.json"
+    frozen = f.read_bytes()
+    assert gc.load(f)[1] == rec["geocells_sha256"]  # the file on disk is the recorded partition
+
+    real = gc.for_target
+
+    def other_cpu(*a, **k):  # a rebuild on another CPU: same cells, centroids 1 ulp apart
+        t = real(*a, **k)
+        return {**t, "centroid_lat": np.nextafter(t["centroid_lat"], 90).tolist()}
+
+    monkeypatch.setattr(gc, "for_target", other_cpu)
+    calls = []
+    monkeypatch.setattr(g, "probe_logits", lambda *a: calls.append(1) or (_ for _ in ()).throw(
+        AssertionError("no probe may retrain")))
+    table = p3.run(p3_args(tmp_path, *args, "--methods", "cell", "hybrid", "--device", ""))
+    assert calls == [] and f.read_bytes() == frozen  # loaded, never overwritten
+    assert (table["cell_target"] == rec["target"]).all()
+    assert set(table["variant"]) == {"geo_cell_random", "geo_hybrid_random"}
+
+    f.write_bytes(frozen.replace(b'"min_deg":0.01', b'"min_deg":0.02'))  # a corrupted file
+    with pytest.raises(SystemExit, match="the loaded file has sha256"):
+        p3.run(p3_args(tmp_path, *args, "--methods", "hybrid"))
+    f.unlink()  # no frozen file: rebuilt and checked (here the 'other CPU' rebuild differs)
+    with pytest.raises(SystemExit, match="the rebuilt partition"):
+        p3.run(p3_args(tmp_path, *args, "--methods", "hybrid"))
+    monkeypatch.setattr(gc, "for_target", real)
+    f.unlink()
+    p3.run(p3_args(tmp_path, *args, "--methods", "hybrid"))  # a bit-identical rebuild is accepted
+    assert f.read_bytes() == frozen and calls == []
+
+
+def test_partition_sha_is_the_same_on_every_numpy_simd_path(tmp_path):
+    """The build has no device code path; its float64 trig and sums follow numpy's CPU
+    dispatch. Rebuild with every dispatch target this CPU has disabled (baseline only) and
+    compare (on an AVX-512 host this covers the AVX-512 path)."""
+    import subprocess
+
+    from numpy._core._multiarray_umath import __cpu_dispatch__, __cpu_features__
+
+    on = [t for t in __cpu_dispatch__ if __cpu_features__.get(t)]
+    if not on:
+        pytest.skip("no numpy dispatch target above the baseline on this CPU")
+    code = ("import numpy as np, sys; from geoguessr_ai import geocells as gc; "
+            "r = np.random.default_rng(0); lat = np.concatenate([r.normal(48, 3, 6000), "
+            "r.uniform(-60, 70, 4000)]).clip(-89, 89); lon = r.uniform(-180, 180, 10000); "
+            "print(gc.save(gc.for_target(lat, lon, 200), __import__('pathlib').Path(sys.argv[1])))")
+    sha = {}
+    for name, env in (("default", {}), ("baseline", {"NPY_DISABLE_CPU_FEATURES": " ".join(on)})):
+        r = subprocess.run([sys.executable, "-c", code, str(tmp_path / f"{name}.json")],
+                           capture_output=True, text=True, check=False,
+                           env={**__import__("os").environ, **env})
+        assert r.returncode == 0, r.stderr
+        sha[name] = r.stdout.strip()
+    assert sha["default"] == sha["baseline"], f"disabled {on}: {sha}"
+
+
+def test_cell_count_selection_refuses_without_select_n(setup):  # noqa: F811
+    tmp_path, _ = setup
+    with pytest.raises(SystemExit, match="include 500000 in --sizes or pass --cell-target"):
+        p3.run(p3_args(tmp_path, "--methods", "cell", "--cell-targets", "4"))  # sizes 30 90
+    assert not (tmp_path / "p3" / "cell_count.json").exists()
+
+
+# ------------------------------------------- Step 2: saved top cells, CPU-only hybrid, stop/resume
+
+CELL_ARGS = ["--cell-target", "4", "--probe-epochs", "2", "--probe-lrs", "0.1", "--mask-km", "20",
+             "--k", "1", "5"]
+
+
+def test_top_cells_file_holds_five_ids_and_their_probabilities(setup):  # noqa: F811
+    tmp_path, _ = setup
+    p3.run(p3_args(tmp_path, *CELL_ARGS, "--methods", "cell", "--backbones", "streetclip",
+                   "--orderings", "nat", "--sizes", "90", "--probe-inits", "random",
+                   "--cell-target", "8"))
+    d = tmp_path / "p3" / "streetclip" / "nat_90_geo_cell_random"
+    for split in ("dev_seen", "dev"):
+        t = pd.read_csv(d / f"{split}_top_cells.csv")
+        assert list(t.columns) == ["id", *[f"c{j}" for j in range(5)], *[f"p{j}" for j in range(5)]]
+        p = t[[f"p{j}" for j in range(5)]].to_numpy()
+        assert (p > 0).all() and (p <= 1 + 1e-9).all() and (np.diff(p, axis=1) <= 1e-12).all()
+        assert (p.sum(1) <= 1 + 1e-9).all()
+
+
+def test_top_cell_probs_are_the_softmax():
+    z = np.array([[0.0, 1.0, 2.0, 3.0], [5.0, 5.0, 0.0, 0.0]])
+    top = p3.top_cells(z, 2)
+    ref = np.exp(z) / np.exp(z).sum(1, keepdims=True)
+    assert np.allclose(p3.top_cell_probs(z, top), np.take_along_axis(ref, top, 1))
+
+
+def test_hybrid_runs_without_cuda_from_saved_top_cells(setup, monkeypatch):  # noqa: F811
+    tmp_path, _ = setup
+    base = ["--backbones", "streetclip", "--orderings", "nat", "--sizes", "90", *CELL_ARGS]
+    p3.run(p3_args(tmp_path, *base, "--methods", "cell", "hybrid"))
+    out = tmp_path / "p3"
+    hyb = out / "streetclip" / "nat_90_geo_hybrid_random"
+    first = json.loads((hyb / "row.json").read_text())
+    for d in out.glob("*/*_geo_hybrid_*"):
+        shutil.rmtree(d)
+
+    def no_probe(*a, **k):
+        raise AssertionError("the hybrid must not train a probe")
+
+    import torch
+    monkeypatch.setattr(g, "probe_logits", no_probe)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    table = p3.run(p3_args(tmp_path, *base, "--methods", "hybrid", "--device", ""))
+    again = json.loads((hyb / "row.json").read_text())
+    assert set(table["variant"]) == {"geo_cell_random", "geo_cell_zeroshot", "geo_hybrid_random",
+                                     "geo_hybrid_zeroshot"}
+    assert again["knn_device"] == "cpu" and again["cache_key"] == first["cache_key"]
+    assert again["dev_seen_geoscore"] == first["dev_seen_geoscore"]  # same top cells, same kNN
+
+
+def test_cell_key_has_no_knn_numerics(setup):  # noqa: F811
+    tmp_path, _ = setup
+    data, emb = tmp_path / "v2", tmp_path / "emb" / "streetclip"
+
+    def key(m, *extra):
+        return p3.cache_key(p3.cache_settings(p3_args(tmp_path, *extra), data, emb, m, ("x", 4)))
+
+    for flag in (["--device", "cuda"], ["--mask-km", "5"], ["--knn-dtype", "fp16"]):
+        assert key("cell", *flag) == key("cell")
+        assert key("knn", *flag) != key("knn") and key("hybrid", *flag) != key("hybrid")
+
+
+def test_cuda_cell_probes_serve_a_cpu_hybrid_run(setup, monkeypatch):  # noqa: F811
+    import torch
+
+    tmp_path, _ = setup
+    base = ["--backbones", "streetclip", "--orderings", "nat", "--sizes", "90", *CELL_ARGS,
+            "--probe-inits", "random"]
+    real = g.probe_logits
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)  # run() keeps --device cuda
+    monkeypatch.setattr(g, "probe_logits", lambda *a: real(*a[:-1], "cpu"))  # no GPU here
+    p3.run(p3_args(tmp_path, *base, "--methods", "cell", "--device", "cuda"))
+    d = tmp_path / "p3" / "streetclip"
+    assert json.loads((d / "nat_90_geo_cell_random" / "row.json").read_text())["knn_device"] == "cuda"
+
+    def no_probe(*a, **k):
+        raise AssertionError("the hybrid must not train a probe")
+
+    monkeypatch.setattr(g, "probe_logits", no_probe)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    table = p3.run(p3_args(tmp_path, *base, "--methods", "hybrid", "--device", ""))
+    assert set(table["variant"]) == {"geo_cell_random", "geo_hybrid_random"}
+    assert json.loads((d / "nat_90_geo_hybrid_random" / "row.json").read_text())["knn_device"] == "cpu"
+
+
+def test_hybrid_key_follows_its_probe_source_and_hybrid_alone_needs_cells(setup, monkeypatch):  # noqa: F811
+    tmp_path, _ = setup
+    base = ["--backbones", "streetclip", "--orderings", "nat", "--sizes", "90", *CELL_ARGS,
+            "--probe-inits", "random"]
+    with pytest.raises(SystemExit, match="needs finished cell probes"):
+        p3.run(p3_args(tmp_path, *base, "--methods", "hybrid"))
+    p3.run(p3_args(tmp_path, *base, "--methods", "cell", "hybrid"))
+    calls = []
+    real = p3.run_hybrid
+    monkeypatch.setattr(p3, "run_hybrid", lambda *a, **k: calls.append(a[2]) or real(*a, **k))
+    p3.run(p3_args(tmp_path, *base, "--methods", "hybrid"))
+    assert calls == []  # cached: same probe source
+    f = tmp_path / "p3" / "streetclip" / "nat_90_geo_cell_random" / "dev_seen_top_cells.csv"
+    t = pd.read_csv(f)
+    t["c0"] = (t["c0"] + 1) % 4  # a different probe output
+    t.to_csv(f, index=False)
+    p3.run(p3_args(tmp_path, *base, "--methods", "hybrid"))
+    assert calls == [90]  # only that hybrid cell is redone, no cell probe is trained
+
+
+def test_stop_file_finishes_the_cell_then_asks_to_resume(setup, monkeypatch, capsys):  # noqa: F811
+    tmp_path, _ = setup
+    stop, ran = tmp_path / "STOP", []
+    real = p3.run_cells
+
+    def spy(ctx, o, n, *a, **k):
+        if not ran:
+            stop.touch()  # the deadline passes while the first cell runs
+        ran.append((o, n))
+        return real(ctx, o, n, *a, **k)
+
+    monkeypatch.setattr(p3, "run_cells", spy)
+    args = ["--backbones", "streetclip", "--probe-inits", "random", "--methods", "cell",
+            *CELL_ARGS, "--stop-file", str(stop)]
+    with pytest.raises(p3.StopRequested, match="3 cell run"):
+        p3.run(p3_args(tmp_path, *args))
+    done = sorted(p.parent.name for p in (tmp_path / "p3" / "streetclip").glob("*/row.json"))
+    assert len(ran) == 1 and len(done) == 1  # the cell in hand was finished and saved
+    stop.unlink()
+    p3.run(p3_args(tmp_path, *args))
+    assert len(ran) == 4 and len(set(ran)) == 4  # the other three ran; the first did not rerun
+    stop.touch()
+    fresh = p3_args(tmp_path, *args, "--out", str(tmp_path / "q"))  # before parse_args is patched
+    monkeypatch.setattr(p3, "parse_args", lambda: fresh)
+    monkeypatch.setattr(sys, "argv", ["phase3_eval"])
+    with pytest.raises(SystemExit) as e:
+        p3.main()
+    assert e.value.code == 3 and "RESUME NEEDED" in capsys.readouterr().out

@@ -1,0 +1,2 @@
+analysis,id,claim,estimate,ci_lo,ci_hi,n_images
+exploratory,nat_shrink,"gap(N=50000) - gap(N=500000), hybrid_zeroshot, nat; no direction pre-registered, uncorrected creator interval, no verdict",-154.0973419636268,-181.06615202120508,-128.2430131085516,210122

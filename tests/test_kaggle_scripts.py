@@ -35,6 +35,13 @@ case " $* " in
     exit $bad ;;
   *" geoguessr_ai.embed "*|*" geoguessr_ai.zipq "*) sleep 2 ;;
   *" geoguessr_ai.phase1_eval "*) echo "EVAL RAN" ;;
+  *" geoguessr_ai.phase3_eval "*)
+    stop=; prev=; for a in "$@"; do [ "$prev" = --stop-file ] && stop=$a; prev=$a; done
+    if [ -n "${STUB_P3_WAIT:-}" ]; then  # runs until the deadline's STOP marker appears
+      for _ in $(seq 1 100); do [ -e "$stop" ] && break; sleep 0.1; done
+      [ -e "$stop" ] && { echo "RESUME NEEDED: stub stopped"; exit 3; }
+    fi
+    echo "P3 RAN" ;;
   *" -m geoguessr_ai."*) echo "unexpected: $*" >&2; exit 9 ;;
   *) exec "$REAL_PY" "$@" ;;
 esac
@@ -130,3 +137,90 @@ def test_reap_never_ends_a_set_e_script():
     r = subprocess.run([BASH, "-c", script], capture_output=True, text=True, timeout=60,
                        check=False, stdin=subprocess.DEVNULL)
     assert r.returncode == 0 and r.stdout.strip() == "reached", r.stderr
+
+
+def _p3_inputs(tmp_path):
+    inp = tmp_path / "in"
+    for d in ("v2", "emb/streetclip", "emb/clip_l14_336", "emb/clip_b16"):
+        (inp / d).mkdir(parents=True)
+    (inp / "v2" / "config.json").write_text("{}")
+    return inp
+
+
+def _p3_call(tmp_path):
+    (call,) = [c for c in _calls(tmp_path) if "phase3_eval" in c]
+    return call
+
+
+@LINUX
+def test_phase3_passes_the_env_settings_through_and_picks_the_device(tmp_path):
+    inp = _p3_inputs(tmp_path)
+    env = _env(tmp_path, INPUT_DIR=inp.as_posix(), METHODS="cell", BACKBONES="streetclip,clip_l14_336",
+               ORDERINGS="nat", SIZES="50000 500000", PROBE_INITS="random")
+    r = _bash("kaggle_phase3.sh", env)
+    assert r.returncode == 0, (r.stdout + r.stderr)[-3000:]
+    c = _p3_call(tmp_path)
+    for part in ("--methods cell", "--device cuda", "--backbones streetclip clip_l14_336",
+                 "--orderings nat", "--sizes 50000 500000", "--probe-inits random", "--stop-file"):
+        assert part in c, c
+    assert "session_end_utc" in r.stdout and "(exit 0" in r.stdout
+
+
+@LINUX
+def test_phase3_hybrid_is_a_cpu_run_and_cell_needs_a_gpu(tmp_path):
+    inp = _p3_inputs(tmp_path)
+    r = _bash("kaggle_phase3.sh", _env(tmp_path, INPUT_DIR=inp.as_posix(), METHODS="hybrid"))
+    assert r.returncode == 0, (r.stdout + r.stderr)[-3000:]
+    assert "--methods hybrid --device  --knn-dtype fp32" in _p3_call(tmp_path)  # '' = CPU
+    (tmp_path / "bin" / "nvidia-smi").write_text("#!/usr/bin/env bash\nexit 1\n", newline="\n")
+    (tmp_path / "calls.log").unlink()
+    r = _bash("kaggle_phase3.sh", _env_again(tmp_path, inp, METHODS="cell"))
+    assert r.returncode == 1 and "needs a GPU" in r.stdout and not _calls(tmp_path)
+
+
+def _env_again(tmp_path, inp, **extra):  # the same fakes on PATH (the fake nvidia-smi rewritten)
+    bin_ = tmp_path / "bin"
+    return {**os.environ, "PATH": f"{bin_.as_posix()}{os.pathsep}{os.environ['PATH']}",
+            "REAL_PY": Path(sys.executable).as_posix(), "STUB_LOG": (tmp_path / "calls.log").as_posix(),
+            "KAGGLE_ROOT": (tmp_path / "kaggle").as_posix(), "INPUT_DIR": inp.as_posix(), **extra}
+
+
+@LINUX
+def test_phase3_deadline_writes_stop_then_exits_3_with_resume_needed(tmp_path):
+    inp = _p3_inputs(tmp_path)
+    env = _env(tmp_path, INPUT_DIR=inp.as_posix(), METHODS="cell", DEADLINE_MIN="0.02",
+               STUB_P3_WAIT="1")
+    r = _bash("kaggle_phase3.sh", env)
+    out = r.stdout + r.stderr
+    assert r.returncode == 3, out[-3000:]
+    assert "DEADLINE: STOP written" in out and out.count("RESUME NEEDED") == 2  # python's + script's
+    assert "session_end_utc" in out and "(exit 3" in out
+    quota = (tmp_path / "kaggle/working/phase3_eval/quota_times.txt").read_text()
+    assert "session_start_utc" in quota and "session_end_utc" in quota
+
+
+@LINUX
+def test_phase3_seed_from_copies_a_finished_output_and_refuses_ambiguous_ones(tmp_path):
+    inp = _p3_inputs(tmp_path)
+    env = _env(tmp_path, INPUT_DIR=inp.as_posix(), SEED_FROM=(tmp_path / "kaggle/input/runA/phase3_eval").as_posix())
+    seed = tmp_path / "kaggle/input/runA/phase3_eval"
+    (seed / "streetclip/nat_50000_geo_cell_random").mkdir(parents=True)
+    (seed / "streetclip/nat_50000_geo_cell_random/row.json").write_text("{}")
+    (seed / "cell_count.json").write_text("{}")
+    (seed / "STOP").write_text("")
+    out = tmp_path / "kaggle/working/phase3_eval"
+    r = _bash("kaggle_phase3.sh", env)
+    assert r.returncode == 0, (r.stdout + r.stderr)[-3000:]
+    assert (out / "cell_count.json").exists() and (out / "streetclip/nat_50000_geo_cell_random/row.json").exists()
+    assert not (out / "STOP").exists()  # a copied marker would stop the run at once
+    shutil.rmtree(out)  # now the refusals: each exits 1 before phase3_eval is called
+    for name, path, msg in (("missing", tmp_path / "nope", "not a directory"),
+                            ("parent", seed.parent, "not a phase3_eval output dir")):
+        (tmp_path / "calls.log").unlink(missing_ok=True)
+        r = _bash("kaggle_phase3.sh", _env_again(tmp_path, inp, SEED_FROM=path.as_posix()))
+        assert r.returncode == 1 and msg in r.stdout and not _calls(tmp_path), (name, r.stdout)
+    assert "found: " + seed.as_posix() in r.stdout  # the nested output is named
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "x").write_text("")
+    r = _bash("kaggle_phase3.sh", _env_again(tmp_path, inp, SEED_FROM=seed.as_posix()))
+    assert r.returncode == 1 and "not empty" in r.stdout

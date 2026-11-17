@@ -9,6 +9,7 @@
 #   !git clone <repo url> /kaggle/working/geoguessr-ai && cd /kaggle/working/geoguessr-ai && pip install -q -e .
 #   !bash /kaggle/working/geoguessr-ai/scripts/kaggle_phase0.sh 2>&1 | tee /kaggle/working/phase0.log
 set -euo pipefail
+export PYTHONUNBUFFERED=1  # live Kaggle logs (python output through tee)
 
 W=/kaggle/working
 RAW=/kaggle/temp/raw           # raw CSVs (about 3 GB) stay out of /kaggle/working

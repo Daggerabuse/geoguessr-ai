@@ -1,0 +1,441 @@
+{
+  "run": {
+    "prereg_sha256": "6aef5a15fed9662f8e586be417f48d05e7871561edf096afbb4db26c8228d66c",
+    "code_commit": "86d9f8b328b0bf93f626d0dea0b17bb04c46f540",
+    "repro_sha256": "20121787c7265e5f0f4051ebde610fa01c969e18d614bef71c0b2e0f6afb7e76"
+  },
+  "cells": [
+    {
+      "backbone": "streetclip",
+      "ordering": "nat",
+      "n": 50000,
+      "predictor": "medoid",
+      "geoscore": 4013.064189160937,
+      "stored": 4013.058260223098,
+      "diff": 0.005928937839144055,
+      "ok": true
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "nat",
+      "n": 50000,
+      "predictor": "cell_random",
+      "top1_cell_same": 1.0,
+      "top5_set_same": 0.9999497638902843,
+      "geoscore": 4005.507377839824,
+      "stored": 4005.507377839824,
+      "diff": 0.0,
+      "ok": true
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "nat",
+      "n": 50000,
+      "predictor": "cell_zeroshot",
+      "top1_cell_same": 1.0,
+      "top5_set_same": 0.999849291670853,
+      "geoscore": 4053.086538943229,
+      "stored": 4053.086538943229,
+      "diff": 0.0,
+      "ok": true
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "nat",
+      "n": 50000,
+      "predictor": "hybrid_random",
+      "geoscore": 4074.864070681109,
+      "stored": 4074.864070681109,
+      "diff": 0.0,
+      "ok": true
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "nat",
+      "n": 50000,
+      "predictor": "hybrid_zeroshot",
+      "geoscore": 4087.8602450225226,
+      "stored": 4087.8578250156675,
+      "diff": 0.0024200068551181175,
+      "ok": true
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "nat",
+      "n": 100000,
+      "predictor": "medoid",
+      "geoscore": 4092.62135340976,
+      "stored": 4092.62135340976,
+      "diff": 0.0,
+      "ok": true
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "nat",
+      "n": 100000,
+      "predictor": "cell_random",
+      "top1_cell_same": 1.0,
+      "top5_set_same": 1.0,
+      "geoscore": 4118.169042845754,
+      "stored": 4118.169042845754,
+      "diff": 0.0,
+      "ok": true
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "nat",
+      "n": 100000,
+      "predictor": "cell_zeroshot",
+      "top1_cell_same": 1.0,
+      "top5_set_same": 0.9998995277805687,
+      "geoscore": 4142.502919690565,
+      "stored": 4142.502919690565,
+      "diff": 0.0,
+      "ok": true
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "nat",
+      "n": 100000,
+      "predictor": "hybrid_random",
+      "geoscore": 4178.044113427555,
+      "stored": 4178.044113427555,
+      "diff": 0.0,
+      "ok": true
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "nat",
+      "n": 100000,
+      "predictor": "hybrid_zeroshot",
+      "geoscore": 4173.062377578688,
+      "stored": 4173.081784062152,
+      "diff": -0.019406483464081248,
+      "ok": true
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "nat",
+      "n": 200000,
+      "predictor": "medoid",
+      "geoscore": 4165.798555630816,
+      "stored": 4165.798555630816,
+      "diff": 0.0,
+      "ok": true
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "nat",
+      "n": 200000,
+      "predictor": "cell_random",
+      "top1_cell_same": 1.0,
+      "top5_set_same": 1.0,
+      "geoscore": 4224.564904428564,
+      "stored": 4224.564904428564,
+      "diff": 0.0,
+      "ok": true
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "nat",
+      "n": 200000,
+      "predictor": "cell_zeroshot",
+      "top1_cell_same": 1.0,
+      "top5_set_same": 1.0,
+      "geoscore": 4234.660885403353,
+      "stored": 4234.660885403353,
+      "diff": 0.0,
+      "ok": true
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "nat",
+      "n": 200000,
+      "predictor": "hybrid_random",
+      "geoscore": 4262.591559457878,
+      "stored": 4262.591559457878,
+      "diff": 0.0,
+      "ok": true
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "nat",
+      "n": 200000,
+      "predictor": "hybrid_zeroshot",
+      "geoscore": 4263.2045887536915,
+      "stored": 4263.2045887536915,
+      "diff": 0.0,
+      "ok": true
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "nat",
+      "n": 500000,
+      "predictor": "medoid",
+      "geoscore": 4255.961464919965,
+      "stored": 4255.961464919965,
+      "diff": 0.0,
+      "ok": true
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "nat",
+      "n": 500000,
+      "predictor": "cell_random",
+      "top1_cell_same": 1.0,
+      "top5_set_same": 1.0,
+      "geoscore": 4309.376281747578,
+      "stored": 4309.376281747578,
+      "diff": 0.0,
+      "ok": true
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "nat",
+      "n": 500000,
+      "predictor": "cell_zeroshot",
+      "top1_cell_same": 0.9999497638902843,
+      "top5_set_same": 1.0,
+      "geoscore": 4312.587571542054,
+      "stored": 4312.570321989041,
+      "diff": 0.017249553013243712,
+      "ok": true
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "nat",
+      "n": 500000,
+      "predictor": "hybrid_random",
+      "geoscore": 4343.944909401726,
+      "stored": 4343.944909401726,
+      "diff": 0.0,
+      "ok": true
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "nat",
+      "n": 500000,
+      "predictor": "hybrid_zeroshot",
+      "geoscore": 4350.707886893207,
+      "stored": 4350.707886893207,
+      "diff": 0.0,
+      "ok": true
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "bal",
+      "n": 50000,
+      "predictor": "medoid",
+      "geoscore": 3608.4997783017834,
+      "stored": 3608.4997783017834,
+      "diff": 0.0,
+      "ok": true
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "bal",
+      "n": 50000,
+      "predictor": "cell_random",
+      "top1_cell_same": 1.0,
+      "top5_set_same": 1.0,
+      "geoscore": 3303.084552001004,
+      "stored": 3303.084552001004,
+      "diff": 0.0,
+      "ok": true
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "bal",
+      "n": 50000,
+      "predictor": "cell_zeroshot",
+      "top1_cell_same": 1.0,
+      "top5_set_same": 1.0,
+      "geoscore": 3586.33090420672,
+      "stored": 3586.33090420672,
+      "diff": 0.0,
+      "ok": true
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "bal",
+      "n": 50000,
+      "predictor": "hybrid_random",
+      "geoscore": 3567.808857262578,
+      "stored": 3567.808857262578,
+      "diff": 0.0,
+      "ok": true
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "bal",
+      "n": 50000,
+      "predictor": "hybrid_zeroshot",
+      "geoscore": 3692.1695069006,
+      "stored": 3692.1695069006,
+      "diff": 0.0,
+      "ok": true
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "bal",
+      "n": 100000,
+      "predictor": "medoid",
+      "geoscore": 3767.234553721111,
+      "stored": 3767.234553721111,
+      "diff": 0.0,
+      "ok": true
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "bal",
+      "n": 100000,
+      "predictor": "cell_random",
+      "top1_cell_same": 1.0,
+      "top5_set_same": 1.0,
+      "geoscore": 3513.1472233454797,
+      "stored": 3513.1472233454797,
+      "diff": 0.0,
+      "ok": true
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "bal",
+      "n": 100000,
+      "predictor": "cell_zeroshot",
+      "top1_cell_same": 1.0,
+      "top5_set_same": 0.9999497638902843,
+      "geoscore": 3738.4035736918727,
+      "stored": 3738.4035736918727,
+      "diff": 0.0,
+      "ok": true
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "bal",
+      "n": 100000,
+      "predictor": "hybrid_random",
+      "geoscore": 3735.3904144574617,
+      "stored": 3735.3904144574617,
+      "diff": 0.0,
+      "ok": true
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "bal",
+      "n": 100000,
+      "predictor": "hybrid_zeroshot",
+      "geoscore": 3821.172006221571,
+      "stored": 3821.09660881626,
+      "diff": 0.0753974053109232,
+      "ok": true
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "bal",
+      "n": 200000,
+      "predictor": "medoid",
+      "geoscore": 3902.7291324305984,
+      "stored": 3902.7291324305984,
+      "diff": 0.0,
+      "ok": true
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "bal",
+      "n": 200000,
+      "predictor": "cell_random",
+      "top1_cell_same": 1.0,
+      "top5_set_same": 1.0,
+      "geoscore": 3787.6986896997873,
+      "stored": 3787.6986896997873,
+      "diff": 0.0,
+      "ok": true
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "bal",
+      "n": 200000,
+      "predictor": "cell_zeroshot",
+      "top1_cell_same": 1.0,
+      "top5_set_same": 0.9999497638902843,
+      "geoscore": 3871.4593100900174,
+      "stored": 3871.4593100900174,
+      "diff": 0.0,
+      "ok": true
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "bal",
+      "n": 200000,
+      "predictor": "hybrid_random",
+      "geoscore": 3922.3544905961653,
+      "stored": 3922.3544905961653,
+      "diff": 0.0,
+      "ok": true
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "bal",
+      "n": 200000,
+      "predictor": "hybrid_zeroshot",
+      "geoscore": 3943.9535406684918,
+      "stored": 3943.9535406684918,
+      "diff": 0.0,
+      "ok": true
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "bal",
+      "n": 500000,
+      "predictor": "medoid",
+      "geoscore": 4077.6944458716916,
+      "stored": 4077.6944458716916,
+      "diff": 0.0,
+      "ok": true
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "bal",
+      "n": 500000,
+      "predictor": "cell_random",
+      "top1_cell_same": 1.0,
+      "top5_set_same": 1.0,
+      "geoscore": 4087.3283544607393,
+      "stored": 4087.3283544607393,
+      "diff": 0.0,
+      "ok": true
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "bal",
+      "n": 500000,
+      "predictor": "cell_zeroshot",
+      "top1_cell_same": 1.0,
+      "top5_set_same": 1.0,
+      "geoscore": 4093.6465742504115,
+      "stored": 4093.6465742504115,
+      "diff": 0.0,
+      "ok": true
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "bal",
+      "n": 500000,
+      "predictor": "hybrid_random",
+      "geoscore": 4143.6515029444145,
+      "stored": 4143.6515029444145,
+      "diff": 0.0,
+      "ok": true
+    },
+    {
+      "backbone": "streetclip",
+      "ordering": "bal",
+      "n": 500000,
+      "predictor": "hybrid_zeroshot",
+      "geoscore": 4149.763990402562,
+      "stored": 4149.763990402562,
+      "diff": 0.0,
+      "ok": true
+    }
+  ]
+}

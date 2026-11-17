@@ -190,3 +190,344 @@ test-level coordinate evaluation gets its own pre-registration first. The Phase 
 already computed exploratory kNN (medoid) test distance metrics (`results/v2/test_results.csv`);
 Phase 3 code never reads them and they were not looked at. On Kaggle (CPU-only session, the full
 run's output attached): `bash scripts/kaggle_phase3.sh`.
+
+Review fixes (dev step). dev_seen shares creators with train without a distance buffer, so
+`--mask-km` (default 1) removes, per dev query, every training image within that haversine
+distance of its true location before the top-k search; the masked count per split is printed and
+stored (`*_masked_mean`, `*_masked_any_share`). Baselines on the same splits: a constant
+(spherical mean of the subset), predicted country -> that country's training centroid (Phase 1's
+frozen `probe_random` dev predictions from `--phase1-dev`, else the masked kNN vote), the oracle
+nearest training image after masking (a lower bound) and the oracle best of the retrieved
+neighbours. The constant and the nearest-image oracle do not depend on the backbone and get no
+paired gap. kNN numerics are pinned: `--knn-dtype` (default fp32) and the device are recorded in
+every `row.json`; the Kaggle script runs numpy fp32 on the CPU, and the Phase 3 selection and any
+test run must use the same setting (Phase 1 ran fp16 on the GPU). A finished cell is reused only
+if its `cache_key` matches: CACHE_VERSION, the sha256 of the data dir's `config.json`, the
+embedding cache (encoder.json hash, file names and sizes), the k and tau grids, mask_km, device,
+dtype, seed, n_boot and the Phase 1 probe source (`cache_settings` in `geo_metrics.json`). The
+`geo_medoid` vs Phase 1 check runs only with `--mask-km 0`.
+
+Step 1 dev analysis (`scripts/analysis/phase3_dev_summary.py`, dev only, no test km or GeoScore):
+`results/v3/phase3_dev_summary.csv` (every predictor per backbone x ordering x N, both dev splits),
+`scaling_geo.png` and `gap_geo.png`, and `phase3_dev_leakage.csv`, an exploratory comparison of
+the masked `geo_medoid` (1 km mask, CPU fp32) with Phase 1's unmasked kNN coordinates (GPU fp16).
+The difference mixes the mask with the device/dtype change and is not a clean leakage estimate.
+`geo_mean` selected k=1 in every cell on dev_seen, i.e. it degenerated to `geo_top1`, so the
+hybrid's default predictor is `medoid` (`--hybrid-predictor`, chosen after seeing this dev result;
+`mean` stays selectable).
+
+Step 2, geocells (`METHODS=cell` in a GPU session with internet on, `METHODS=hybrid` in a CPU
+session). `geocells.py` builds one quadtree on (lat, lon) from the coordinates of the full
+training pool (no labels, no images): a box splits into 4 while it holds more than
+`max_per_cell` points and is larger than 0.01 degrees; `max_per_cell` is set by bisection to hit
+the target count; a cell's centroid is the normalised 3D mean of its pool points (or its pool
+point nearest that mean when the mean leaves the box). The partition is saved as JSON and its
+sha256 enters the cache key. One partition serves every N (the same classes along the scaling
+curve), so it uses the pool's geographic density beyond a subset. `--methods cell` trains the
+Phase 1 probe (lr grid 1e-3..1e-1, 60 epochs, patience 8) over cell ids, random or zero-shot
+initialised (each cell: the text embedding of its majority country in the subset); the epoch is
+chosen by cell top-1 and the lr by GeoScore, both on dev_seen. Per cell and split (dev_seen,
+dev_unseen) it saves the top-5 cell ids and their probabilities (`<split>_top_cells.csv`).
+`--methods hybrid` reads only those files (no probe is trained, no GPU is needed; it refuses if a
+cell probe is missing): it keeps the masked global kNN top-1000 inside the probe's top-m cells (m
+in {1, 3, 5}, chosen on dev_seen) and applies `--hybrid-predictor`, else the top cell's centroid.
+The hybrid's cache key includes its probe source (the cell's key and the hash of its top-cells
+files), so a changed probe reruns exactly its hybrid cells. The cell probe's own key leaves out
+mask_km, device and dtype (it has no kNN; the device used is still recorded in its `row.json`), so
+probes trained with `--device cuda` are found by the CPU session's `--methods hybrid --device ''`;
+the kNN and hybrid keys keep all three. The cell probe trains on all of the subset's training
+images, including those within the near-duplicate mask radius of dev queries: only the kNN parts
+(Step 1 and the hybrid's neighbour search) are masked. The same images are masked for both
+backbones, but kNN vs cell is not a like-for-like comparison. (Corrected 2026-11-15, pre-registration
+review: an earlier version said the paired StreetCLIP vs L/14-336 gap is unaffected. That is not
+guaranteed. The mask removes the same images, but it costs more to the backbone that retrieves
+near-duplicates better.)
+
+Decisions made before any Step 2 result (changes to the first Step 2 design):
+- **Cell-count selection uses the random init only.** 1K/2K/5K cells for StreetCLIP and L/14-336
+  at nat 500K; the count with the best average dev_seen GeoScore of the pair, recorded in
+  `cell_count.json` and frozen for both inits, every backbone, ordering and N. (Before: the
+  average over both inits.) Rationale: random init only fits the weekly GPU budget (selection
+  with both inits ≈ 2.6 h vs ≈ 1.3 h). It stays neutral between the compared backbones (average
+  of StreetCLIP and L/14-336); the zero-shot variant uses the frozen count chosen this way. The
+  selection refuses to run unless 500000 is among `--sizes` (or `--cell-target` is given), so a
+  `SIZES` subset cannot freeze a count chosen at a smaller N. Every later run loads the frozen
+  partition file (`geocells/cells_<target>.json`, carried over by `SEED_FROM`) and aborts if
+  its sha256 differs from the one in `cell_count.json`. Only without that file is it rebuilt,
+  and the rebuild must hash the same. (Fix after the first hybrid session: that run rebuilt
+  the partition on a CPU-only host and got another sha256 than the GPU sessions, with the same
+  cell count and `max_per_cell`. The tree comes from comparisons and exact halving only, so the
+  difference is in the float64 centroids, whose trig and sums follow numpy's CPU-dependent
+  SIMD paths. The rebuild also overwrote the seeded file before the check; it no longer does.)
+- **The hybrid runs in a CPU-only session.** Cell probes (GPU) and hybrid (CPU) are separate
+  runs: the hybrid's kNN is the Step 1 setting (numpy fp32, `--device ''`), so Step 1 and the
+  hybrid share one numerical pin. (Before: kNN on cuda in the same GPU session.)
+- Not changed: `--hybrid-predictor` defaults to `medoid` (`geo_mean` degenerated to top-1 on
+  dev, see above).
+
+Decisions made after Step 2 finished, before the lr counts were computed (2026-11-15):
+- **Probe lr-grid edge (cell probes).** Per init (random, zeroshot) and per edge of the grid
+  {1e-3, 3e-3, 1e-2, 3e-2, 1e-1}: if the lower edge 1e-3 is the selected lr in at least 8 of
+  that init's 24 cells (3 backbones x nat/bal x 4 N), 3e-4 is added for that init; if the upper
+  edge 1e-1 is selected in at least 8, 3e-1 is added. The added lr runs on all 24 cells of
+  that init, incrementally (stored lr runs reused, choice made over the merged sweep, as in
+  Phase 1); selection is unchanged (epoch by cell top-1, lr by GeoScore, both on dev_seen).
+  Stopping rule (Phase 1's): this is the final extension. If an added edge lr is then
+  selected, or an edge is selected in fewer than 8 cells, the grid stays frozen and those cells
+  are flagged `grid_edge` and reported as a limitation.
+- Honest note: the threshold was set after partially seeing the live Kaggle logs (a few
+  zero-shot cells visibly picked 1e-3; B/16 nat 200K picked 1e-2 (this live reading was mistaken;
+  the saved sweep shows 1e-3)). The full counts had not been
+  computed when this rule was written. Counts and per-cell neighbour GeoScores:
+  `scripts/analysis/phase3_cell_lr.py` -> `results/v3/phase3_cell_lr.csv`.
+- Outcome: the zero-shot lower edge met the threshold and no other init x edge did, so
+  `phase3_eval.EXTRA_LRS = {"zeroshot": (3e-4,)}`. An init's extra lrs enter its cell key only
+  when it has any (`extra_lrs` in `cache_settings`), so the random cells keep their keys. A
+  zero-shot cell whose row still has the base-grid key is resumed: its stored lr runs are reused,
+  only 3e-4 is trained, and if 3e-4 does not beat the stored choice (a tie keeps it) its scores
+  and top-cells files stand. Its hybrid reruns, because the probe key changed. Kaggle notebooks:
+  `runs/kaggle_phase3_extend_cells.ipynb` (GPU, zero-shot only) and
+  `runs/kaggle_phase3_hybrid.ipynb` (CPU; random now, zero-shot after the extension).
+- **Hybrid m grid (2026-11-15, after all 48 hybrids finished).**
+  - Honest note: this was decided after the counts had been seen. m = 5, the upper edge of
+    {1, 3, 5}, was picked in 35/48 hybrids.
+  - **The grid is not extended.** Each cell probe saved only its top-5 cells per query (`top_cells`
+    keeps max(HYBRID_M) = 5), and its weights were not saved. So m > 5 cannot be computed from
+    stored data. A retrain on the GPU was considered and declined.
+  - m is frozen at {1, 3, 5}. The m = 5 picks are flagged `grid_edge_high` in
+    `results/v3/phase3_cell_flags.csv` and reported as a limitation, with their margin vs m = 3.
+  - The m → all-cells limit is known by construction, though not rerun: no cell filter leaves the
+    first k of the same masked CPU fp32 search, which is Step 1's `geo_medoid` over the same k
+    grid. In 30 of the 35 m = 5 picks the medoid scores below m = 5 on dev_seen. In 5 it scores
+    above, so the dev_seen optimum over m lies above 5 there; all 5 are random init, bal, N ≤ 100K.
+  - Cell-probe keys and files are unchanged (nothing reran).
+
+Test-phase requirements for the cell probe and hybrid, decided before any test run (2026-11-15).
+The probe weights of the dev runs were not saved, so a test evaluation cannot reuse them:
+- **Retrain and save.** The test evaluation retrains each declared cell probe once, with its
+  frozen dev_seen-selected lr and epoch, the same seed, and the stored settings (the cell's
+  `cache_settings`). There is no lr or epoch search. The weights are saved next to the cell.
+- **Reproduction check before any test scoring.** The retrained probe's dev_seen top-5 cells and
+  dev_seen GeoScore are compared with the stored dev values (`dev_seen_top_cells.csv`, `row.json`).
+  If any cell is outside the tolerance, the run stops before test is read. The tolerance allows
+  for GPU nondeterminism. Proposed values, to be fixed in the Phase 3 pre-registration:
+  - the top-1 cell is identical for ≥ 99% of dev_seen queries;
+  - the top-5 set is identical for ≥ 95%;
+  - |dev_seen GeoScore difference| ≤ 2.
+  The hybrid is then recomputed from the retrained probe's top cells with its frozen m and k.
+- **Cost estimate** (scaled from the dev cells' own timings: one lr trained to the selected
+  epoch, plus a dev_seen evaluation per epoch):
+  - GPU: ≈ 2.2 h for all 48 cell probes, plus loading, ≈ 3 h.
+  - CPU: the hybrids' kNN on test ≈ 2–3.5 h, from the 3.5 h the 48 dev hybrids took over two
+    sessions. (Wrong: it ignored that test has 210,122 queries against 39,906 on the two dev
+    splits. Corrected in the Phase 3 pre-registration below.)
+  - A subset declared in the pre-registration costs proportionally less.
+
+Final dev merge (`scripts/analysis/phase3_merge.py`): the final cell probes (random from session
+C, zero-shot from the 3e-4 extension) and the 48 hybrids are copied into
+`runs/phase3_final_dev/phase3_eval`. Each cell's key is recomputed from its stored settings, and
+each hybrid's key from the merged probe's source, i.e. it was built from the final probe. The
+stored settings are compared with the current code, the geocell sha256 is checked everywhere,
+and per backbone the data and embedding hashes must match the Step 1 kNN cells (checked for
+consistency only: the data and embeddings are not local). Any mismatch is listed and the script
+exits 1.
+
+Step 2 dev analysis (`scripts/analysis/phase3_cell_summary.py --run <merged dir>`, dev only, reads
+every cell's `row.json` and `*_geo_hits.csv`), over five predictors (geo_medoid, cell and hybrid
+x random / zero-shot):
+- `results/v3/phase3_dev_predictors.csv`: GeoScore and median km;
+- `phase3_cell_backbone_gap.csv`: StreetCLIP - L/14-336 and StreetCLIP - B/16, GeoScore and
+  median km;
+- `phase3_backbone_shrink.csv`: 50K -> 500K;
+- `phase3_cell_init_gap.csv`: zero-shot - random;
+- `phase3_cell_best.csv`: the best predictor by dev_seen GeoScore vs the runner-up and vs
+  geo_medoid. Masked kNN vs unmasked probe, so not like for like;
+- `phase3_cell_flags.csv`: lr grid_edge or epoch-cap cell probes, and hybrid m/k at a grid edge,
+  with the margin vs each grid neighbour. m=1 and k=1 are natural lower bounds;
+- `phase3_cell_scaling.png`, `phase3_cell_gap.png` and `phase3_cell_gap_b16.png`.
+
+Intervals are paired cluster bootstraps with phase3_eval's n_boot and seed, and need `--data`
+(dev_seen.csv and dev.csv). The numbers are in `results/v3/PHASE3_DEV_SUMMARY.md`.
+
+Sessions (`kaggle_phase3.sh`; env: `METHODS`, `BACKBONES`, `ORDERINGS`, `SIZES`, `PROBE_INITS`,
+`DEADLINE_MIN`, `SEED_FROM`). At `DEADLINE_MIN` a STOP marker lets the cell in hand finish, then
+the run prints RESUME NEEDED and exits 3 (hard kill GRACE_MIN, default 45, later; that cell is
+lost). Finished cells are cached; `SEED_FROM=<earlier output dir>` copies it into the empty
+output of a fresh session (refused if it is not a phase3_eval output, the output dir itself, or
+the output is not empty). A cell probe of an init that is done is never retrained.
+
+Exploratory Phase 1 check in the same session: with the test embedding run (`emb_test`) and the
+Phase 1 dev output attached, `kaggle_phase3.sh` ends with `scripts/analysis/phase1_posthoc.py`,
+which recomputes the kNN cells whose dev_seen-matched k differs between the two backbones (k shared
+by the pair's average dev_seen top-1) on the CPU in fp32. It writes only predicted countries and
+top-1 hits (`phase1_matched_k_cpu.csv.gz`) and the agreement with Phase 1's saved GPU fp16 dev
+predictions; locally `--run runs/phase1_final ... --cpu-preds <that file>` adds the matched test
+gap and the test prediction agreement.
+
+## Phase 3 pre-registration (coordinates on the official test split)
+
+Written 2026-11-15, before any test distance or GeoScore of Phase 3 was read. File:
+`configs/phase3_final.json`, written by `python -m geoguessr_ai.phase3_final prereg --dev-run
+runs/phase3_final_dev/phase3_eval --knn-run runs/phase3_dev/phase3_eval --dev-results
+results/v3/phase3_dev_predictors.csv`. Its sha256 is
+`6aef5a15fed9662f8e586be417f48d05e7871561edf096afbb4db26c8228d66c`.
+`dev_results_sha256` in it is the hash of the committed `results/v3/phase3_dev_predictors.csv`.
+The test code (`src/geoguessr_ai/phase3_final.py`) is committed with it, so the statistic is
+fixed by the same commit. The dev evidence is `results/v3/PHASE3_DEV_SUMMARY.md`.
+
+**What is evaluated.** StreetCLIP and CLIP L/14-336 (B/16 is not scored on test), nat and bal,
+N = 50K, 100K, 200K, 500K, five predictors: 80 cells. Each cell uses the values chosen on
+dev_seen and stored in the file (the medoid's k; the cell probe's lr and epoch; the hybrid's m
+and k), the frozen 5000-cell partition (sha256 `9882eb2a…`), seed 42, the 1 km mask and the CPU
+fp32 kNN of the dev runs. Nothing is searched on test.
+
+**Primary predictor and metric** (chosen from dev only). Predictor: the zero-shot hybrid
+(`hybrid_zeroshot`). By dev_seen GeoScore a hybrid is the best of the five predictors in every
+backbone x ordering x N cell, and the zero-shot hybrid in most of them. Metric: mean GeoScore.
+It is the quantity every selection maximised (k, m, lr, cell count); median km was reported but
+never selected on. "Gap" below is StreetCLIP minus L/14-336 on the same test images.
+
+**Hypotheses (5, each one-sided).**
+- H1: at bal 50K, StreetCLIP scores higher than L/14-336 with the primary predictor.
+- H2: the same at nat 50K. On dev this gap is small; it is the least certain of the five.
+- H3: at bal, the gap is smaller at 500K than at 50K (primary predictor).
+- H4: at nat 50K, the gap of the cell probe is larger with a random init than with a zero-shot
+  init. In words: the zero-shot init helps L/14-336 more than StreetCLIP. Why is not tested: a
+  text-initialised head giving the base model what StreetCLIP already has, and a plain ceiling
+  effect, both predict this sign.
+- H5: the same at bal 50K.
+
+Exploratory, not in the family (E1): at nat 500K, the primary predictor minus the kNN medoid,
+averaged over the two backbones. It was H6 in the first draft and was moved out before the file
+was committed: the kNN parts are under the 1 km mask and the probe inside the hybrid is trained
+unmasked, so the comparison is not like for like. It is still reported
+(`exploratory_contrasts.csv`): estimate and uncorrected creator interval, no p-value, no verdict.
+
+How the five were chosen: by direction and size from roughly a hundred dev contrasts (5
+predictors x 2 orderings x 4 N x 2 dev splits, plus shrink and init contrasts). They are not a
+random sample of what could have been tested. H1 is close to certain on dev and repeats what
+Phase 1 showed for country top-1. H3 is stated for bal only because nat went the other way on dev.
+H4 and H5 use the cell probe; the same contrast for the hybrid is near zero on dev_unseen at nat
+50K.
+
+Not a hypothesis: whether the gap shrinks at nat. On dev it does not shrink with a zero-shot
+init, so no direction is claimed; the nat shrink is reported with its interval as exploratory.
+
+**Test statistic and decision rule.** Each hypothesis is a fixed weighted sum of per-image test
+GeoScores over the cells listed under `terms` in the file; the statistic is its mean over the
+test images. Resampling: 10,000 paired cluster-bootstrap resamples, seed 42, clusters =
+**creators** (Phase 1 resampled sequences; its post-hoc review showed test errors are correlated
+within creators and the sequence intervals too narrow). One resample applies to every cell of a
+hypothesis. p = (1 + number of resampled statistics <= 0) / 10,001, so p is never below 1/10,001.
+The five p-values are Holm-Bonferroni adjusted; a hypothesis is supported when its adjusted p
+< 0.05, otherwise not supported. The sequence-clustered interval and p are printed next to each
+(`seq_*`) and decide nothing. Every test id must be embedded for both backbones, or the run
+stops; the largest creator's share of the test images is printed with each hypothesis.
+
+The analysis runs once, when all 80 cells are scored. If a cell cannot be scored after
+`test_read_started.json` exists, its hypotheses count with p = 1 (`primary --missing-as-p1`). A
+later fix is a published amendment, reported next to that result and not instead of it.
+
+One run: the result is the first run. Its identity (pre-registration sha256, code commit with no
+modified tracked file, sha256 of the probes' `repro.json`, which holds each head's sha256) is
+written into `dev_check.json`, `test_read_started.json` and every `test_row.json`. `test`
+refuses heads other than the recorded ones, and `primary` refuses cells of different runs.
+
+**Reproduction check (before test is read).** The dev probes' weights were not saved. Each probe
+is retrained once: frozen lr, exactly the frozen number of epochs, same seed, last head kept
+(this is the head the dev run restored). On dev_seen, against the stored dev files (their sha256
+is in the file):
+- the top-1 cell is the same for >= 99% of the queries;
+- the set of top-5 cells is the same for >= 95%;
+- |GeoScore difference| <= 2 for the cell probe and for the hybrid (frozen m, k, recomputed from
+  the retrained probe); <= 0.5 for the medoid (CPU fp32, should be near exact).
+
+It runs twice: in the GPU session on the trained logits, and in every CPU session on the saved
+heads before the test split is loaded. A CPU session checks all 80 cells of both backbones, also
+when it scores only one backbone. If any of the 80 cells is outside a tolerance, the run stops and
+test is not read. No cell is dropped and no hypothesis is evaluated on fewer cells. A tolerance
+can only be changed by a dated amendment to the file, committed before any test distance is read,
+that publishes every failing number. The tolerances were set without data on how much a T4 retrain
+varies; a failure is therefore possible for reasons that have nothing to do with the result.
+
+**Reported whatever the outcome.**
+- All five hypotheses: estimate, creator interval, raw and Holm p, verdict, and the sequence
+  columns (`primary.csv`).
+- E1, the hybrid minus the medoid at nat 500K (`exploratory_contrasts.csv`), labelled
+  exploratory, with the mask caveat in its `claim` column.
+- Every declared cell's test GeoScore, median km and accuracy within 1/25/200/750/2500 km, next
+  to its dev_seen and dev_unseen GeoScore and its `grid_edge` flags (`results.csv`).
+- The StreetCLIP minus L/14-336 gap of every predictor x ordering x N (`exploratory_gaps.csv`),
+  labelled exploratory.
+- The reproduction numbers of every cell (`repro.json`, `dev_check.json`), pass or fail.
+- The share of test queries with a masked training image and the hybrid's fallback share.
+
+**Known limitations.**
+- lr grid edge: 13 of the 32 declared cell probes chose the lowest lr of their grid (`lr_low`).
+  The grid is final; the neighbour margins are in `results/v3/phase3_cell_flags.csv`.
+- m grid edge: 23 of the 32 declared hybrids chose m = 5, the top of {1, 3, 5} (`m_high`). m > 5
+  could not be computed from stored data and was not run.
+- Epoch cap: 2 declared probes chose epoch 60, the cap; 14 never stopped early.
+- Rule timing: the lr-edge threshold (8/24) was written after some live Kaggle logs had been
+  seen, before the counts were computed. The m grid was frozen after its counts were seen.
+- The hybrid's medoid predictor was chosen after dev showed the weighted mean collapsing to k = 1.
+  The cell count (5000) was chosen on dev_seen, random init only, nat 500K.
+- dev_seen optimism: every choice, including the primary predictor, was made on dev_seen, and
+  the dev_seen numbers in the file are from the same split. dev_seen shares creators with train
+  and has no distance buffer. Test may rank the predictors differently.
+- Masked kNN vs unmasked probe: the kNN parts mask training images within 1 km of the query's
+  true location and the probe does not. E1 compares the two kinds of predictor, so the hybrid is
+  favoured wherever the mask removes something; this is why E1 is exploratory. The mask also need not cost both backbones the
+  same (H1 to H3). The mask is applied on test as on dev; the masked share on test is reported
+  so the reader can see how much it matters there. An unmasked medoid is not computed.
+- The p-value is a percentile-bootstrap p, not a test under a constructed null. With a few very
+  large creators it is unstable; the largest creator's share is reported for that reason.
+- Each backbone has its own k, m, lr and epoch (not matched between the two). A gap includes
+  any difference in how well the grids suit each backbone.
+- Phase 1 already scored country top-1 on the same test images, and its results are known:
+  StreetCLIP ahead at 50K, test harder than dev. H1 and H2 are not blind to that. Phase 1 also
+  wrote exploratory kNN distance metrics on test (`results/v2/test_results.csv`); they were not
+  opened for Phase 3.
+- The two test sessions (one per backbone) print per-cell test scores before the paired analysis
+  exists. Nothing may be changed after `test_read_started.json` is written.
+- The retrain is not bit-identical to the dev probes (GPU). The hypotheses are about the
+  retrained probes, which the tolerance ties to the dev ones.
+- Exactly tied cells (head rows that stay identical, e.g. empty cells of one country after a
+  zero-shot init) can be ordered differently by the GPU and the CPU. This changes a prediction
+  when the tie is at rank 1 (the cells have different centroids) or across rank 5 (the hybrid's
+  filter). The dev_seen check bounds how often; ties are not counted separately.
+- As in Phase 1, this is self-discipline, not proof: git timestamps and the provenance file are
+  written by us. The provenance shows only that the file was committed before the probes run
+  (its `embedding_started` field, named for Phase 1, holds that run's start). The test embeddings
+  are older than this pre-registration. Pushing the commit before the probes run gives GitHub's
+  push time as the only outside record.
+
+**What we will NOT conclude.**
+- From "not supported": that there is no gap, no shrink or no init effect. It only means this
+  test did not show it at the corrected level.
+- Anything confirmatory about B/16, N = 100K or 200K, the random hybrid, median km, accuracy at a
+  distance, countries or creators. These are exploratory, with uncorrected intervals.
+- From a supported H4 or H5: anything about the hybrid, about N above 50K, or about why the init
+  matters.
+- From a supported H1: more than a confirmation, in km, of what Phase 1 showed for countries.
+- That StreetCLIP's training causes a gap: the two backbones also differ in how well the shared
+  grids fit them.
+- That the hybrid is the best coordinate predictor, or better than kNN. No hypothesis tests it;
+  E1 is exploratory, one N, one ordering, not like for like, and both methods were tuned on
+  dev_seen.
+- That the numbers are comparable with the OSV-5M paper beyond the shared metric: the training
+  sets here are 50K-500K subsets and the models are frozen.
+- Anything about fine-tuned models.
+
+**Running it** (`runs/kaggle_phase3_test.ipynb`, pinned to the commit of the file):
+1. GPU session (T4 as in the dev runs), test embeddings not attached: `phase3_final probes`.
+   32 probes, ≈ 2 GPU h. Writes the provenance, the heads and `repro.json`; exit 1 if the check
+   fails.
+2. CPU session per backbone, with the probes output and `emb_test` attached: `phase3_final test`.
+   The dev_seen check of both backbones first, then test. Rough estimate 6–7 CPU h per backbone
+   plus the check (unmeasured: scaled from the dev sessions to about 5 times the queries); the
+   first subset's printed time gives the real rate. A deadline stops cleanly and the next
+   session resumes.
+3. `phase3_final primary` on the two outputs merged: `primary.csv`.
+
+Outcome (2026-11-17): see results/v3/PHASE3_TEST_RESULTS.md — H1, H3, H4, H5 supported; H2 not supported (estimate in the opposite direction).

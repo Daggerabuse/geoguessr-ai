@@ -103,26 +103,47 @@ def summarize(per_image: dict[str, np.ndarray], km: np.ndarray | None, clusters,
 # ----------------------------------------------------------------- kNN
 
 
-def knn(query: np.ndarray, db: np.ndarray, k: int, device: str | None = None):
+def knn(query: np.ndarray, db: np.ndarray, k: int, device: str | None = None,
+        dtype: str | None = None, exclude: tuple[np.ndarray, np.ndarray] | None = None):
     """Top-k cosine neighbours (rows are L2-normalized). Returns (sims, idx), best first.
 
     device: run the matrix products with torch on that device (e.g. "cuda"); None = numpy.
+    dtype: "fp16" or "fp32"; None = fp16 on a torch device, fp32 in numpy (Phase 1's setting).
+      numpy "fp16" emulates the GPU path: fp16 inputs, fp32 products, scores rounded to fp16.
+    exclude: (query rows, db rows) pairs that are never returned (score set to -inf).
     """
     k = min(k, len(db))
     chunk = 1024 if device else 256  # one chunk of scores: chunk x len(db) values
+    half = dtype == "fp16" or (dtype is None and bool(device))
     sims, idx = [], []
+    if exclude is not None:
+        order = np.argsort(exclude[0], kind="stable")
+        ex_q, ex_d = np.asarray(exclude[0])[order], np.asarray(exclude[1])[order]
     if device:
         import torch
 
-        dbt = torch.from_numpy(db).to(device, dtype=torch.float16)
+        tdt = torch.float16 if half else torch.float32
+        dbt = torch.from_numpy(db).to(device, dtype=tdt)
+    elif half:
+        db = db.astype(np.float16).astype(np.float32)
     for s in range(0, len(query), chunk):
+        if exclude is not None:
+            a, b = np.searchsorted(ex_q, [s, s + chunk])
+            rows, cols = ex_q[a:b] - s, ex_d[a:b]
         if device:
-            q = torch.from_numpy(query[s : s + chunk]).to(device, dtype=torch.float16)
-            v, i = (q @ dbt.T).topk(k, dim=1)
+            q = torch.from_numpy(query[s : s + chunk]).to(device, dtype=tdt)
+            sc = q @ dbt.T
+            if exclude is not None and len(rows):
+                sc[torch.from_numpy(rows).to(device), torch.from_numpy(cols).to(device)] = -torch.inf
+            v, i = sc.topk(k, dim=1)
             sims.append(v.float().cpu().numpy())
             idx.append(i.cpu().numpy())
             continue
-        sc = query[s : s + chunk] @ db.T
+        q = query[s : s + chunk]
+        sc = (q.astype(np.float16).astype(np.float32) @ db.T).astype(np.float16).astype(np.float32) \
+            if half else q @ db.T
+        if exclude is not None and len(rows):
+            sc[rows, cols] = -np.inf
         part = np.argpartition(-sc, k - 1, axis=1)[:, :k]
         ps = np.take_along_axis(sc, part, 1)
         o = np.argsort(-ps, axis=1)
@@ -139,15 +160,22 @@ def knn_country_scores(sims, idx, db_labels, n_classes: int, k: int) -> np.ndarr
     return scores
 
 
-def knn_coordinates(sims, idx, db_lat, db_lon, k: int, chunk: int = 2048):
+def knn_coordinates(sims, idx, db_lat, db_lon, k: int, chunk: int = 2048, valid=None):
     """Geographic medoid of the k neighbours: the neighbour with the smallest similarity-
-    weighted sum of distances to the others (robust to a few far-away matches)."""
+    weighted sum of distances to the others (robust to a few far-away matches).
+    valid: optional (N, >=k) bool; invalid neighbours neither weigh nor can be the medoid
+    (each row needs a valid first column)."""
     lat, lon = db_lat[idx[:, :k]], db_lon[idx[:, :k]]
     best = np.zeros(len(idx), dtype=int)
     for s in range(0, len(idx), chunk):
         la, lo, w = lat[s : s + chunk], lon[s : s + chunk], sims[s : s + chunk, :k]
         d = haversine(la[:, :, None], lo[:, :, None], la[:, None, :], lo[:, None, :])
-        best[s : s + chunk] = np.argmin((d * w[:, None, :]).sum(-1), axis=1)
+        if valid is None:
+            best[s : s + chunk] = np.argmin((d * w[:, None, :]).sum(-1), axis=1)
+            continue
+        v = valid[s : s + chunk, :k]
+        cost = (d * (w * v)[:, None, :]).sum(-1)
+        best[s : s + chunk] = np.argmin(np.where(v, cost, np.inf), axis=1)
     r = np.arange(len(idx))
     return lat[r, best], lon[r, best]
 
@@ -169,13 +197,15 @@ def knn_top1_coords(idx, db_lat, db_lon):
     return db_lat[idx[:, 0]], db_lon[idx[:, 0]]
 
 
-def knn_mean_coords(sims, idx, db_lat, db_lon, k: int, tau: float | None = None):
+def knn_mean_coords(sims, idx, db_lat, db_lon, k: int, tau: float | None = None, valid=None):
     """Weighted mean of the k neighbours on the sphere: the mean of their 3D unit vectors,
     projected back (no lat/lon averaging, so it is correct across the antimeridian and near the
     poles). Weights: the cosine similarity (tau None) or exp((sim - best sim) / tau). Where the
     mean vector nearly vanishes (neighbours spread around the globe) the nearest neighbour is used."""
     s = sims[:, :k].astype(np.float64)
     w = s if tau is None else np.exp((s - s[:, :1]) / tau)
+    if valid is not None:  # invalid neighbours get weight 0 (see knn_coordinates)
+        w = w * valid[:, :k]
     v = (w[:, :, None] * to_xyz(db_lat[idx[:, :k]], db_lon[idx[:, :k]])).sum(axis=1)
     lat, lon = from_xyz(v)
     bad = np.linalg.norm(v, axis=1) < 1e-6 * np.abs(w).sum(axis=1)
@@ -209,9 +239,11 @@ def text_head(model_name: str, classes: list[str], template: str):
         return as_embedding(text(**t), "text", text.config.projection_dim).float()
 
 
-def probe_logits(feats, labels, dev_feats, dev_labels, eval_feats: dict, head_init, args, device):
+def probe_logits(feats, labels, dev_feats, dev_labels, eval_feats: dict, head_init, args, device,
+                 save_head=None):
     """Train train.py's probe (cosine head, epoch chosen by top-1 on dev_feats, the
-    selection split); return logits per split."""
+    selection split); return logits per split. save_head: .npy path for the trained head rows
+    (unnormalised, float32)."""
     import torch
     import torch.nn.functional as F
     from torch import nn
@@ -230,6 +262,8 @@ def probe_logits(feats, labels, dev_feats, dev_labels, eval_feats: dict, head_in
     t = lambda x: torch.from_numpy(x).to(device)
     history: list[dict] = []
     train_probe(model, t(feats), labels, t(dev_feats), dev_labels, args, device, history)
+    if save_head:
+        np.save(save_head, model.head.detach().cpu().numpy())
     with torch.no_grad():
         return {k: model.logits_from_embed(t(v)).cpu().numpy() for k, v in eval_feats.items()}, history
 

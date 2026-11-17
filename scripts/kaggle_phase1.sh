@@ -19,6 +19,7 @@
 # On exit, success or not, a trap prints throughput/disk and writes session_end_utc.
 # Stop the Kaggle session right after the last cell: the quota runs until it is stopped.
 set -euo pipefail
+export PYTHONUNBUFFERED=1  # live Kaggle logs (python output through tee)
 set +x
 . "$(dirname "${BASH_SOURCE[0]}")/bg_helpers.sh"
 . "$(dirname "${BASH_SOURCE[0]}")/find_input.sh"

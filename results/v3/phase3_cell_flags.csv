@@ -1,0 +1,83 @@
+kind,backbone,ordering,n,predictor,flags,param,grid,pick,neighbour,margin,epoch,stopped_early
+cell,streetclip,nat,500000,geo_cell_random,grid_edge_low;epoch_cap,lr,0.001 0.003 0.01 0.03 0.1,0.001,0.003,2.6957741700089173,60.0,False
+cell,streetclip,bal,50000,geo_cell_random,grid_edge_low,lr,0.001 0.003 0.01 0.03 0.1,0.001,0.003,95.15815563461047,56.0,False
+cell,streetclip,bal,100000,geo_cell_random,grid_edge_low,lr,0.001 0.003 0.01 0.03 0.1,0.001,0.003,67.70974414460989,56.0,False
+cell,streetclip,bal,200000,geo_cell_random,grid_edge_low,lr,0.001 0.003 0.01 0.03 0.1,0.001,0.003,76.49835928287985,44.0,True
+cell,streetclip,bal,200000,geo_cell_zeroshot,grid_edge_low,lr,0.0003 0.001 0.003 0.01 0.03 0.1,0.0003,0.001,63.93027713596439,56.0,False
+cell,clip_l14_336,nat,50000,geo_cell_random,grid_edge_low,lr,0.001 0.003 0.01 0.03 0.1,0.001,0.003,22.103001522537852,59.0,False
+cell,clip_l14_336,nat,50000,geo_cell_zeroshot,grid_edge_low,lr,0.0003 0.001 0.003 0.01 0.03 0.1,0.0003,0.001,3.4301055920464023,56.0,False
+cell,clip_l14_336,nat,100000,geo_cell_zeroshot,grid_edge_low,lr,0.0003 0.001 0.003 0.01 0.03 0.1,0.0003,0.001,2.1469643839036507,57.0,False
+cell,clip_l14_336,nat,200000,geo_cell_zeroshot,grid_edge_low,lr,0.0003 0.001 0.003 0.01 0.03 0.1,0.0003,0.001,3.7180862023387817,55.0,False
+cell,clip_l14_336,nat,500000,geo_cell_zeroshot,grid_edge_low;epoch_cap,lr,0.0003 0.001 0.003 0.01 0.03 0.1,0.0003,0.001,4.916800449095717,60.0,False
+cell,clip_l14_336,bal,200000,geo_cell_random,grid_edge_low,lr,0.001 0.003 0.01 0.03 0.1,0.001,0.003,67.481041958682,51.0,True
+cell,clip_l14_336,bal,200000,geo_cell_zeroshot,grid_edge_low,lr,0.0003 0.001 0.003 0.01 0.03 0.1,0.0003,0.001,70.96413856945264,44.0,True
+cell,clip_l14_336,bal,500000,geo_cell_zeroshot,grid_edge_low,lr,0.0003 0.001 0.003 0.01 0.03 0.1,0.0003,0.001,0.4843496111429886,57.0,False
+cell,clip_b16,nat,50000,geo_cell_zeroshot,grid_edge_low;epoch_cap,lr,0.0003 0.001 0.003 0.01 0.03 0.1,0.0003,0.001,8.359238617067604,60.0,False
+cell,clip_b16,nat,100000,geo_cell_zeroshot,grid_edge_low;epoch_cap,lr,0.0003 0.001 0.003 0.01 0.03 0.1,0.0003,0.001,2.3338259849833776,60.0,False
+cell,clip_b16,nat,200000,geo_cell_zeroshot,grid_edge_low,lr,0.0003 0.001 0.003 0.01 0.03 0.1,0.0003,0.001,5.370885321219248,55.0,False
+cell,clip_b16,bal,50000,geo_cell_random,grid_edge_low,lr,0.001 0.003 0.01 0.03 0.1,0.001,0.003,60.2634100190503,57.0,False
+cell,clip_b16,bal,50000,geo_cell_zeroshot,grid_edge_low,lr,0.0003 0.001 0.003 0.01 0.03 0.1,0.0003,0.001,33.0601815066907,40.0,True
+cell,clip_b16,bal,100000,geo_cell_zeroshot,grid_edge_low,lr,0.0003 0.001 0.003 0.01 0.03 0.1,0.0003,0.001,7.028640779090438,42.0,True
+cell,clip_b16,bal,200000,geo_cell_zeroshot,grid_edge_low,lr,0.0003 0.001 0.003 0.01 0.03 0.1,0.0003,0.001,17.795719086303052,58.0,False
+hybrid,clip_b16,bal,100000,geo_hybrid_random,grid_edge_high,m,1 3 5,5.0,3.0,24.927114776873623,,
+hybrid,clip_b16,bal,100000,geo_hybrid_random,natural_lower_bound,k,1 5 10 25 50 100,1.0,5.0,64.38385434808924,,
+hybrid,clip_b16,bal,100000,geo_hybrid_zeroshot,grid_edge_high,m,1 3 5,5.0,3.0,15.107359424104743,,
+hybrid,clip_b16,bal,100000,geo_hybrid_zeroshot,natural_lower_bound,k,1 5 10 25 50 100,1.0,5.0,52.55313660471302,,
+hybrid,clip_b16,bal,200000,geo_hybrid_random,grid_edge_high,m,1 3 5,5.0,3.0,10.634488706333286,,
+hybrid,clip_b16,bal,200000,geo_hybrid_random,natural_lower_bound,k,1 5 10 25 50 100,1.0,5.0,41.07061214618352,,
+hybrid,clip_b16,bal,200000,geo_hybrid_zeroshot,natural_lower_bound,k,1 5 10 25 50 100,1.0,5.0,74.79969710012529,,
+hybrid,clip_b16,bal,500000,geo_hybrid_random,natural_lower_bound,k,1 5 10 25 50 100,1.0,5.0,38.33215434925978,,
+hybrid,clip_b16,bal,500000,geo_hybrid_zeroshot,natural_lower_bound,k,1 5 10 25 50 100,1.0,5.0,32.63098643411513,,
+hybrid,clip_b16,bal,50000,geo_hybrid_random,grid_edge_high,m,1 3 5,5.0,3.0,40.817528253903674,,
+hybrid,clip_b16,bal,50000,geo_hybrid_random,natural_lower_bound,k,1 5 10 25 50 100,1.0,5.0,122.66525955946008,,
+hybrid,clip_b16,bal,50000,geo_hybrid_zeroshot,grid_edge_high,m,1 3 5,5.0,3.0,17.36524103118836,,
+hybrid,clip_b16,bal,50000,geo_hybrid_zeroshot,natural_lower_bound,k,1 5 10 25 50 100,1.0,5.0,82.51589364365736,,
+hybrid,clip_b16,nat,100000,geo_hybrid_random,grid_edge_high,m,1 3 5,5.0,3.0,17.436074699437995,,
+hybrid,clip_b16,nat,100000,geo_hybrid_zeroshot,grid_edge_high,m,1 3 5,5.0,3.0,12.527223456884713,,
+hybrid,clip_b16,nat,200000,geo_hybrid_random,grid_edge_high,m,1 3 5,5.0,3.0,20.62706557514275,,
+hybrid,clip_b16,nat,200000,geo_hybrid_zeroshot,grid_edge_high,m,1 3 5,5.0,3.0,10.19948578569256,,
+hybrid,clip_b16,nat,500000,geo_hybrid_random,grid_edge_high,m,1 3 5,5.0,3.0,1.104816349061366,,
+hybrid,clip_b16,nat,50000,geo_hybrid_random,grid_edge_high,m,1 3 5,5.0,3.0,47.075669605726944,,
+hybrid,clip_b16,nat,50000,geo_hybrid_zeroshot,grid_edge_high,m,1 3 5,5.0,3.0,20.593634271175688,,
+hybrid,clip_l14_336,bal,100000,geo_hybrid_random,grid_edge_high,m,1 3 5,5.0,3.0,50.68783536193723,,
+hybrid,clip_l14_336,bal,100000,geo_hybrid_random,natural_lower_bound,k,1 5 10 25 50 100,1.0,5.0,102.49157656126954,,
+hybrid,clip_l14_336,bal,100000,geo_hybrid_zeroshot,grid_edge_high,m,1 3 5,5.0,3.0,6.0392389187541085,,
+hybrid,clip_l14_336,bal,100000,geo_hybrid_zeroshot,natural_lower_bound,k,1 5 10 25 50 100,1.0,5.0,37.782180271583,,
+hybrid,clip_l14_336,bal,200000,geo_hybrid_random,grid_edge_high,m,1 3 5,5.0,3.0,21.300187007289423,,
+hybrid,clip_l14_336,bal,200000,geo_hybrid_random,natural_lower_bound,k,1 5 10 25 50 100,1.0,5.0,39.06620030241493,,
+hybrid,clip_l14_336,bal,200000,geo_hybrid_zeroshot,grid_edge_high,m,1 3 5,5.0,3.0,6.44465028526929,,
+hybrid,clip_l14_336,bal,200000,geo_hybrid_zeroshot,natural_lower_bound,k,1 5 10 25 50 100,1.0,5.0,16.693161053065523,,
+hybrid,clip_l14_336,bal,500000,geo_hybrid_random,natural_lower_bound,k,1 5 10 25 50 100,1.0,5.0,29.827010826932565,,
+hybrid,clip_l14_336,bal,500000,geo_hybrid_zeroshot,natural_lower_bound,k,1 5 10 25 50 100,1.0,5.0,25.611642448645398,,
+hybrid,clip_l14_336,bal,50000,geo_hybrid_random,grid_edge_high,m,1 3 5,5.0,3.0,57.987936894991435,,
+hybrid,clip_l14_336,bal,50000,geo_hybrid_random,natural_lower_bound,k,1 5 10 25 50 100,1.0,5.0,180.53102494721452,,
+hybrid,clip_l14_336,bal,50000,geo_hybrid_zeroshot,grid_edge_high,m,1 3 5,5.0,3.0,25.277180891456737,,
+hybrid,clip_l14_336,bal,50000,geo_hybrid_zeroshot,natural_lower_bound,k,1 5 10 25 50 100,1.0,5.0,91.27187909145823,,
+hybrid,clip_l14_336,nat,100000,geo_hybrid_random,grid_edge_high,m,1 3 5,5.0,3.0,20.667930419672302,,
+hybrid,clip_l14_336,nat,100000,geo_hybrid_zeroshot,grid_edge_high,m,1 3 5,5.0,3.0,10.523942788181557,,
+hybrid,clip_l14_336,nat,200000,geo_hybrid_random,grid_edge_high,m,1 3 5,5.0,3.0,11.373648565805524,,
+hybrid,clip_l14_336,nat,200000,geo_hybrid_zeroshot,natural_lower_bound,k,1 5 10 25 50 100,1.0,5.0,2.273145533836214,,
+hybrid,clip_l14_336,nat,500000,geo_hybrid_random,grid_edge_high,m,1 3 5,5.0,3.0,3.5860552917602035,,
+hybrid,clip_l14_336,nat,50000,geo_hybrid_random,grid_edge_high,m,1 3 5,5.0,3.0,30.740068033183434,,
+hybrid,clip_l14_336,nat,50000,geo_hybrid_zeroshot,grid_edge_high,m,1 3 5,5.0,3.0,10.746474477389711,,
+hybrid,streetclip,bal,100000,geo_hybrid_random,grid_edge_high,m,1 3 5,5.0,3.0,35.2336603193221,,
+hybrid,streetclip,bal,100000,geo_hybrid_random,natural_lower_bound,k,1 5 10 25 50 100,1.0,5.0,57.68496723689259,,
+hybrid,streetclip,bal,100000,geo_hybrid_zeroshot,grid_edge_high,m,1 3 5,5.0,3.0,11.51595029192913,,
+hybrid,streetclip,bal,100000,geo_hybrid_zeroshot,natural_lower_bound,k,1 5 10 25 50 100,1.0,5.0,13.568846242206746,,
+hybrid,streetclip,bal,200000,geo_hybrid_random,grid_edge_high,m,1 3 5,5.0,3.0,12.779271893213263,,
+hybrid,streetclip,bal,200000,geo_hybrid_random,natural_lower_bound,k,1 5 10 25 50 100,1.0,5.0,14.419163454384488,,
+hybrid,streetclip,bal,200000,geo_hybrid_zeroshot,grid_edge_high,m,1 3 5,5.0,3.0,2.7516374790934606,,
+hybrid,streetclip,bal,200000,geo_hybrid_zeroshot,natural_lower_bound,k,1 5 10 25 50 100,1.0,5.0,2.0934213377518063,,
+hybrid,streetclip,bal,500000,geo_hybrid_random,natural_lower_bound,k,1 5 10 25 50 100,1.0,5.0,16.91630983419691,,
+hybrid,streetclip,bal,500000,geo_hybrid_zeroshot,natural_lower_bound,k,1 5 10 25 50 100,1.0,5.0,14.677997969444732,,
+hybrid,streetclip,bal,50000,geo_hybrid_random,grid_edge_high,m,1 3 5,5.0,3.0,52.19543585666952,,
+hybrid,streetclip,bal,50000,geo_hybrid_random,natural_lower_bound,k,1 5 10 25 50 100,1.0,5.0,125.1863160004832,,
+hybrid,streetclip,bal,50000,geo_hybrid_zeroshot,grid_edge_high,m,1 3 5,5.0,3.0,15.3342522120779,,
+hybrid,streetclip,bal,50000,geo_hybrid_zeroshot,natural_lower_bound,k,1 5 10 25 50 100,1.0,5.0,43.53326026617697,,
+hybrid,streetclip,nat,100000,geo_hybrid_random,grid_edge_high,m,1 3 5,5.0,3.0,7.848523569914505,,
+hybrid,streetclip,nat,100000,geo_hybrid_zeroshot,grid_edge_high,m,1 3 5,5.0,3.0,9.56620731413659,,
+hybrid,streetclip,nat,200000,geo_hybrid_random,grid_edge_high,m,1 3 5,5.0,3.0,1.1648567261090648,,
+hybrid,streetclip,nat,500000,geo_hybrid_random,natural_lower_bound,k,1 5 10 25 50 100,1.0,5.0,3.0106859282777805,,
+hybrid,streetclip,nat,500000,geo_hybrid_zeroshot,natural_lower_bound,k,1 5 10 25 50 100,1.0,5.0,3.026387233409878,,
+hybrid,streetclip,nat,50000,geo_hybrid_random,grid_edge_high,m,1 3 5,5.0,3.0,25.413563916937164,,
+hybrid,streetclip,nat,50000,geo_hybrid_zeroshot,grid_edge_high,m,1 3 5,5.0,3.0,24.33813080589698,,
