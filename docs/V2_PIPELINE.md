@@ -529,3 +529,5 @@ varies; a failure is therefore possible for reasons that have nothing to do with
    first subset's printed time gives the real rate. A deadline stops cleanly and the next
    session resumes.
 3. `phase3_final primary` on the two outputs merged: `primary.csv`.
+
+Outcome (2026-11-17): see results/v3/PHASE3_TEST_RESULTS.md — H1, H3, H4, H5 supported; H2 not supported (estimate in the opposite direction).

@@ -1,0 +1,2 @@
+analysis,id,claim,estimate,ci_lo,ci_hi,n_images
+exploratory,E1/hybrid_vs_knn/nat,"GeoScore(hybrid_zeroshot) - GeoScore(medoid), nat N=500000, average of streetclip and clip_l14_336; not like for like (kNN parts under the 1 km mask, the probe trained unmasked): estimate and uncorrected interval only, no verdict",234.25179720133875,206.13608043114965,263.3601325304803,210122

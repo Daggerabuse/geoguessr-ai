@@ -43,7 +43,7 @@ from geoguessr_ai import phase1_eval as pe
 from geoguessr_ai import phase3_eval as p3
 
 sys.path.insert(0, str(Path(__file__).parent))
-from phase3_cell_lr import cell_rows  # noqa: E402
+from phase3_cell_lr import cell_rows
 
 SPLITS = {"dev_seen": "dev_seen", "dev": "dev_unseen"}  # file prefix -> report name
 COLS = ("geoscore", "acc_25km", "acc_750km")
