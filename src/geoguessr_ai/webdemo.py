@@ -4,7 +4,7 @@
          demo can be tried before anything is on the Hub:
            /web/...                -> web/
            /model/onnx/<f>.onnx    -> --onnx-dir (export_onnx output)
-           /model/<f>.json         -> --model (export_hf folder)
+           /model/<f>.json, <f>.bin -> --model (export_hf or export_geo_demo folder)
          Open http://localhost:8000/web/?base=/model/  (add &model=fp32 for the fp32 graph).
          Without ?base= the page loads the model from the Hub.
 
@@ -54,7 +54,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return str(WEB_DIR.joinpath(*parts[1:]) if parts[1:] else WEB_DIR)
         if parts[:2] == ["model", "onnx"] and len(parts) == 3:
             return str(self.onnx_dir / parts[2])
-        if parts[:1] == ["model"] and len(parts) == 2 and parts[1].endswith(".json"):
+        if parts[:1] == ["model"] and len(parts) == 2 and parts[1].endswith((".json", ".bin")):
             return str(self.model / parts[1])
         return str(WEB_DIR / "__not_found__")
 

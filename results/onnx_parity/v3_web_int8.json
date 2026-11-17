@@ -1,0 +1,9 @@
+{
+  "variant": "int8",
+  "n": 20,
+  "top1_same_as_python_ort": 1.0,
+  "top5_set_same": 1.0,
+  "model_ms_mean": 20860.884999993443,
+  "model_ms_max": 25327.0,
+  "threads": 1
+}

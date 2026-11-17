@@ -112,7 +112,8 @@ def write_tiny_folder(out: Path, n_classes: int = 33, image_size: int = 32) -> P
 # ----------------------------------------------------------------- export
 
 
-def export_fp32(model, image_size: int, path: Path, opset: int = OPSET) -> Path:
+def export_fp32(model, image_size: int, path: Path, opset: int = OPSET,
+                output_name: str = OUTPUT_NAME) -> Path:
     """One self-contained .onnx file (no external data), dynamic batch axis."""
     import onnx
     import torch
@@ -122,7 +123,7 @@ def export_fp32(model, image_size: int, path: Path, opset: int = OPSET) -> Path:
     dummy = torch.zeros(3, 3, image_size, image_size)
     batch = torch.export.Dim("batch", min=1, max=64)
     with torch.no_grad():
-        prog = torch.onnx.export(model, (dummy,), input_names=[INPUT_NAME], output_names=[OUTPUT_NAME],
+        prog = torch.onnx.export(model, (dummy,), input_names=[INPUT_NAME], output_names=[output_name],
                                  dynamic_shapes={"pixel_values": {0: batch}}, opset_version=opset,
                                  dynamo=True, optimize=True)
     prog.save(str(path), external_data=False)
