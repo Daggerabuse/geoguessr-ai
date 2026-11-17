@@ -16,6 +16,7 @@ def server(tmp_path):
     onnx_dir.mkdir()
     (model / "classes.json").write_text(json.dumps(["DE"]))
     (model / "model.safetensors").write_bytes(b"secret weights")
+    (model / "head_f32.bin").write_bytes(b"head")
     (onnx_dir / "model_int8.onnx").write_bytes(b"onnx")
     srv = webdemo.start_server(model, onnx_dir, 0)
     yield f"http://127.0.0.1:{srv.server_address[1]}"
@@ -33,6 +34,7 @@ def test_serves_page_and_model_files(server):
     assert get(f"{server}/web/preprocess.js")[0] == 200
     assert json.loads(get(f"{server}/model/classes.json?x=1")[1]) == ["DE"]
     assert get(f"{server}/model/onnx/model_int8.onnx")[1] == b"onnx"
+    assert get(f"{server}/model/head_f32.bin")[1] == b"head"
 
 
 @pytest.mark.parametrize("path", ["/model/model.safetensors", "/pyproject.toml",
@@ -49,3 +51,11 @@ def test_page_links_and_notes():
     assert "never leaves your device" in html and "Limited to" in html
     readme = (webdemo.WEB_DIR / "README.md").read_text(encoding="utf-8")
     assert "sdk: static" in readme and "app_file: index.html" in readme
+
+
+def test_coords_page_links_and_notes():
+    html = (webdemo.WEB_DIR / "coords.html").read_text(encoding="utf-8")
+    assert "Non-commercial use only" in html and "never leaves your device" in html
+    assert "not calibrated" in html and 'href="./"' in html
+    assert html.count('integrity="sha256-') == 2  # pinned Leaflet files
+    assert 'href="coords.html"' in (webdemo.WEB_DIR / "index.html").read_text(encoding="utf-8")

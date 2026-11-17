@@ -134,6 +134,11 @@ export function shortSideSize(w, h, size) {
   return [Math.max(size, roundHalfEven(w * s)), Math.max(size, roundHalfEven(h * s))];
 }
 
+// Same as embed.clip_center_crop (CLIPImageProcessor): the long side is truncated, not rounded.
+export function truncatedSize(w, h, size) {
+  return w <= h ? [size, Math.trunc((size * h) / w)] : [Math.trunc((size * w) / h), size];
+}
+
 // Top-left corners of the crops in the resized image (app/inference.py eval_crops).
 export function cropOffsets(w, h, size, tta) {
   if (w >= h) {
@@ -148,9 +153,10 @@ export function cropOffsets(w, h, size, tta) {
 
 // RGB uint8 image -> { data: Float32Array (n, 3, size, size), crops, width, height }.
 // float32 arithmetic in the same order as numpy: (x / 255 - mean) / std.
+// cfg.resize "truncate": the V3 geocell model's resize (truncatedSize); otherwise shortSideSize.
 export function preprocess(rgb, w, h, channels, cfg, tta = true) {
   const size = cfg.image_size;
-  const [rw, rh] = shortSideSize(w, h, size);
+  const [rw, rh] = (cfg.resize === "truncate" ? truncatedSize : shortSideSize)(w, h, size);
   const resized = resizeBicubic(rgb, w, h, channels, rw, rh);
   const crops = cropOffsets(rw, rh, size, tta);
   const plane = size * size;
@@ -190,4 +196,18 @@ export function topK(probs, labels, k = 5) {
   return Array.from(probs, (p, i) => [labels[i], p])
     .sort((a, b) => b[1] - a[1])
     .slice(0, k);
+}
+
+// Cells ranked by softmax(scale * emb . head_row); head: Float32Array (n_cells * d), rows
+// normalized; emb normalized. Returns [[cell, prob], ...] for the k most likely, ties by cell id.
+export function topCells(emb, head, scale, k = 5) {
+  const d = emb.length, n = head.length / d;
+  const logits = new Float64Array(n);
+  for (let j = 0; j < n; j++) {
+    let s = 0;
+    for (let i = 0; i < d; i++) s += emb[i] * head[j * d + i];
+    logits[j] = scale * s;
+  }
+  const p = softmax(logits);
+  return [...p.keys()].sort((a, b) => p[b] - p[a] || a - b).slice(0, k).map((j) => [j, p[j]]);
 }

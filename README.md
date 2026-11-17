@@ -13,6 +13,7 @@ Each one reads its test split once, at the end.
   browser demo.
 
 - **Live demo (runs in your browser):** https://huggingface.co/spaces/Daggerabuse/geoguessr-ai
+  (countries, V1) and [coords.html](https://daggerabuse-geoguessr-ai.static.hf.space/coords.html) (coordinates, V3)
 - **Model:** https://huggingface.co/Daggerabuse/geoguessr-clip-vitb16
 
 ## V3 (Phase 3): StreetCLIP vs CLIP L/14-336 in kilometres (OSV-5M test, pre-registered)
@@ -77,6 +78,46 @@ paragraph):
   [docs/V2_PIPELINE.md](docs/V2_PIPELINE.md#phase-3-pre-registration-coordinates-on-the-official-test-split)
 - Results, all tables, reproduction check, dev vs test: [results/v3/PHASE3_TEST_RESULTS.md](results/v3/PHASE3_TEST_RESULTS.md)
 - Dev evidence: [results/v3/PHASE3_DEV_SUMMARY.md](results/v3/PHASE3_DEV_SUMMARY.md)
+
+### V3 demo
+
+`web/coords.html` (same Space as the country demo) runs one V3 predictor in the browser: StreetCLIP
+→ the cell probe (zero-shot init, `nat`, N = 500K; the head of the test run, sha `2454e620…`) → softmax
+over the 5000 cells of the pre-registered partition → the top-5 cell centroids on an OpenStreetMap map.
+It is not the best V3 predictor: the hybrids also search the 500K training embeddings, which do not fit
+in a browser. Preprocessing is the one the embeddings were made with (one center crop, long side
+truncated), and a test checks that the JS gives the same pixels as `embed.clip_center_crop`.
+
+Files: [Daggerabuse/geoguessr-streetclip-geocells](https://huggingface.co/Daggerabuse/geoguessr-streetclip-geocells),
+written by `export_geo_demo`. The encoder (CC BY-NC 4.0) and the head/centroids (from OSV-5M,
+CC BY-SA 4.0) are separate files, because the two licences cannot be combined into one; the demo is
+non-commercial. Agreement with PyTorch on 500 photos from `data/sample` (`results/onnx_parity/v3_geocells.json`)
+and in headless Edge (`scripts/v3_web_check.py`; 8-bit: `results/onnx_parity/v3_web_int8.json`; the fp32
+browser row is from a first run whose report was not saved):
+
+| | fp32 ONNX | 8-bit ONNX |
+|---|---|---|
+| Size | 1219 MB | 351 MB |
+| Top-1 cell = PyTorch (500 photos) | 1.000 | 0.982 |
+| Top-5 set = PyTorch (500 photos) | 1.000 | 0.922 |
+| Top-1 centroid distance to PyTorch's, mean / max | 0 km | 94 km / 15,351 km |
+| GeoScore vs true coordinates, mean [95% CI] (PyTorch: 3366 [3203, 3516]) | 3366 [3203, 3516] | 3366 [3203, 3517] |
+| Median km to the true location (PyTorch: 301 km) | 301 km | 301 km |
+| Paired GeoScore difference vs fp32 [95% CI] | | +0.1 [−22.8, +21.1] (9 photos change cell) |
+| Browser = onnxruntime (Edge, same variant) | 5/5 photos | 20/20 photos |
+| Model time per photo, Edge, one WASM thread (this PC) | about 15 s | 17–21 s (two runs) |
+
+GeoScore is that of the top-1 cell's centroid (5000 · exp(−km / 1492.7)). The intervals resample creators
+(321 of them, 10,000 resamples, seed 42; `results/onnx_parity/v3_geocells.json`, per-image cells in
+`v3_geocells_per_image.csv`). **The 500 photos are from the OSV-5M test split.** They were used only to choose
+the demo's default precision (8-bit), after the pre-registered analysis was final; nothing in the V3 results
+depends on them. With 500 photos the interval of the paired difference is about ±22 GeoScore, so a small loss
+from 8-bit cannot be excluded; the point estimate shows none.
+
+The 8-bit model changes the top-1 cell for about 2% of photos. When it does, it picks another cell the
+model scored almost as high, and that cell can be on another continent. The page is single-threaded
+(the Space is not cross-origin isolated), so a photo takes tens of seconds. These are agreement
+numbers, not accuracy.
 
 ## V2: StreetCLIP vs its CLIP L/14-336 base — how much is the head start worth? (OSV-5M, 216 countries)
 
@@ -393,6 +434,13 @@ uv run python -m geoguessr_ai.export_onnx --model models/hf_export --out models/
     --verify data/sample/images --offset 500 --report results/onnx_parity/report.json
 # serve web/ locally with the local model: http://localhost:8000/web/?base=/model/
 uv run python -m geoguessr_ai.webdemo serve
+# V3 coordinate page: StreetCLIP ONNX + cell head + centroids, parity check against PyTorch
+uv run python -m geoguessr_ai.export_geo_demo \
+    --head runs/phase3_test_probes/phase3_probes/streetclip/nat_500000_geo_cell_zeroshot/head.npy \
+    --cells runs/phase3_final_dev/phase3_eval/geocells/cells_5000.json \
+    --verify data/sample/images --offset 500 --limit 500 --report results/onnx_parity/v3_geocells.json
+# http://localhost:8000/web/coords.html?base=/model/
+uv run python -m geoguessr_ai.webdemo serve --model models/streetclip_geocells --onnx-dir models/streetclip_geocells/onnx
 ```
 
 `app/` (a Gradio version of the demo) is kept but not used: Hugging Face Gradio Spaces require a

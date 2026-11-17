@@ -25,3 +25,4 @@ progress { width: 100%; }
 .top5 .bar { position: absolute; inset: 0 auto 0 0; background: var(--bar); z-index: -1; }
 .top5 li:first-child { font-weight: 600; }
 .about { margin-top: 1.5rem; }
+.map { height: 420px; margin-top: 1rem; border-radius: 8px; }

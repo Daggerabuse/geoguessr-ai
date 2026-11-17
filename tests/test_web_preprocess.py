@@ -13,8 +13,9 @@ import pytest
 from PIL import Image
 
 from geoguessr_ai.baseline_clip import resize_short
+from geoguessr_ai.embed import clip_center_crop
 from geoguessr_ai.export_hf import CLIP_MEAN, CLIP_STD
-from geoguessr_ai.train import eval_views
+from geoguessr_ai.train import eval_views, to_tensor_array
 from tests.conftest import gradient_image
 
 nodejs_wheel = pytest.importorskip("nodejs_wheel")
@@ -22,6 +23,7 @@ nodejs_wheel = pytest.importorskip("nodejs_wheel")
 ROOT = Path(__file__).parent.parent
 PREPROCESS_JS = ROOT / "web" / "preprocess.js"
 CLI = Path(__file__).parent / "js" / "preprocess_cli.mjs"
+TOPCELLS_CLI = Path(__file__).parent / "js" / "topcells_cli.mjs"
 SAMPLE = ROOT / "data" / "sample" / "images"
 
 
@@ -101,3 +103,58 @@ def test_js_preprocess_matches_python(js_results, case, tta):
     want = np.stack(eval_views(rgb, size, tta))
     assert got.shape == want.shape
     assert np.array_equal(got, want), f"{name}: max abs diff {np.abs(got - want).max()}"
+
+
+@pytest.fixture(scope="module")
+def js_truncate(tmp_path_factory):
+    """The V3 page's preprocessing (cfg.resize "truncate", one center crop): {(name, size): array}."""
+    tmp = tmp_path_factory.mktemp("webjs_trunc")
+    results = {}
+    for size in (64, 224, 336):
+        jobs = []
+        for name, im, _ in cases():
+            arr = np.asarray(im)
+            raw = tmp / f"{name}.raw"
+            raw.write_bytes(np.ascontiguousarray(arr).tobytes())
+            jobs.append({"name": name, "raw": str(raw), "w": im.width, "h": im.height,
+                         "channels": arr.shape[2], "tta": False, "out": str(tmp / f"{name}_{size}.f32")})
+        job = tmp / f"job{size}.json"
+        job.write_text(json.dumps({"cfg": {**cfg(size), "resize": "truncate"}, "jobs": jobs}))
+        proc = nodejs_wheel.node([str(CLI), str(job), str(PREPROCESS_JS)],
+                                 return_completed_process=True, capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr
+        for j in jobs:
+            results[(j["name"], size)] = np.fromfile(j["out"], dtype=np.float32).reshape(-1, 3, size, size)
+    return results
+
+
+@pytest.mark.parametrize("size", [64, 224, 336])
+@pytest.mark.parametrize("case", cases(), ids=lambda c: c[0])
+def test_js_truncate_matches_clip_center_crop(js_truncate, case, size):
+    name, im, _ = case
+    want = to_tensor_array(clip_center_crop(im.convert("RGB"), size))[None]
+    got = js_truncate[(name, size)]
+    assert got.shape == want.shape
+    assert np.array_equal(got, want), f"{name}: max abs diff {np.abs(got - want).max()}"
+
+
+def test_js_top_cells_match_numpy(tmp_path):
+    """Small integers keep every dot product exact, so ties are real ties (as identical head rows
+    after a zero-shot init): both sides must rank them by cell id."""
+    rng = np.random.default_rng(0)
+    head = rng.integers(-3, 4, size=(300, 8)).astype(np.float32)
+    head[[10, 50, 120, 200]] = 3  # tied rows, the largest possible dot product with emb
+    emb = rng.integers(1, 3, size=8).astype(np.float32)
+    job = tmp_path / "job.json"
+    job.write_text(json.dumps({"emb": emb.tolist(), "head": head.ravel().tolist(), "scale": 0.5, "k": 5}))
+    proc = nodejs_wheel.node([str(TOPCELLS_CLI), str(job), str(PREPROCESS_JS)],
+                             return_completed_process=True, capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    got = json.loads(proc.stdout)
+    logits = 0.5 * (head.astype(np.float64) @ emb)
+    order = np.argsort(-logits, kind="stable")[:5]
+    p = np.exp(logits - logits.max())
+    p /= p.sum()
+    assert [c for c, _ in got] == order.tolist()
+    np.testing.assert_allclose([q for _, q in got], p[order], rtol=1e-12)
+    assert order[:4].tolist() == [10, 50, 120, 200]  # the tie is at the top

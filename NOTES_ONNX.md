@@ -246,3 +246,14 @@ model dosyalarının üzerine yazar.
 - `README.md`'ye demo linki/ONNX bölümü eklemedim; Space açılınca eklemek isteyebilirsin.
 - Örnek görüntülerin seçim/rapor bölümü (ilk 500 / kalan 2500) dosya adına göre sıralı;
   rastgelelik yok, bu yüzden seed gerekmedi. Tiny model `torch.manual_seed(0)` kullanıyor.
+
+## V3: koordinat sayfası (`web/coords.html`)
+
+- Kodlayıcı (StreetCLIP, CC BY-NC 4.0) ile hücre başlığı + merkezler (OSV-5M, CC BY-SA 4.0) ayrı
+  dosyalar: iki lisans tek bir eserde birleştirilemiyor, birleştirme tarayıcıda çalışma anında.
+  ONNX grafiği sadece `normalize(image_embeds)` veriyor; logit ve softmax `preprocess.js` `topCells`'te.
+- Ön işleme gömmelerin yapıldığı gibi (`embed.clip_center_crop`): tek merkez kırpma, uzun kenar
+  kesilerek (`cfg.resize = "truncate"`), V1'in yuvarlamalı yolu değişmedi.
+- 8-bit aynı yöntem (MatMulNBits, blok 32). Uyum ve süre: `results/onnx_parity/v3_*.json`, README V3 demo tablosu.
+- Tarayıcı kontrolü: `scripts/v3_web_check.py` (headless Edge, tek iş parçacığı).
+- Denenmedi: gerçek Space, mobil, Safari/Firefox, çok iş parçacıklı WASM/WebGPU.
