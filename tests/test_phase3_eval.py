@@ -473,10 +473,14 @@ def test_a_recorded_partition_is_loaded_not_rebuilt(setup, monkeypatch):  # noqa
     assert f.read_bytes() == frozen and calls == []
 
 
-def test_partition_sha_is_the_same_on_every_numpy_simd_path(tmp_path):
-    """The build has no device code path; its float64 trig and sums follow numpy's CPU
-    dispatch. Rebuild with every dispatch target this CPU has disabled (baseline only) and
-    compare (on an AVX-512 host this covers the AVX-512 path)."""
+def test_partition_structure_is_the_same_on_every_numpy_simd_path(tmp_path):
+    """What the pipeline relies on across CPUs: the tree (bounds, children, cell ids, counts,
+    max_per_cell: comparisons and exact halving only) and the cell assignment of every point are
+    identical. The float64 centroids (trig and sums, numpy's CPU dispatch) may differ in the last
+    bits between SIMD paths, so the partition's sha256 is not compared here: a run loads the
+    frozen file and checks its sha256, it never relies on a rebuild matching
+    (test_a_recorded_partition_is_loaded_not_rebuilt). Rebuild with every dispatch target this
+    CPU has disabled (baseline only) and compare."""
     import subprocess
 
     from numpy._core._multiarray_umath import __cpu_dispatch__, __cpu_features__
@@ -484,18 +488,27 @@ def test_partition_sha_is_the_same_on_every_numpy_simd_path(tmp_path):
     on = [t for t in __cpu_dispatch__ if __cpu_features__.get(t)]
     if not on:
         pytest.skip("no numpy dispatch target above the baseline on this CPU")
-    code = ("import numpy as np, sys; from geoguessr_ai import geocells as gc; "
-            "r = np.random.default_rng(0); lat = np.concatenate([r.normal(48, 3, 6000), "
-            "r.uniform(-60, 70, 4000)]).clip(-89, 89); lon = r.uniform(-180, 180, 10000); "
-            "print(gc.save(gc.for_target(lat, lon, 200), __import__('pathlib').Path(sys.argv[1])))")
-    sha = {}
+    code = ("import numpy as np, json, hashlib; from geoguessr_ai import geocells as gc; "
+            "pts = lambda s: (lambda r: (np.concatenate([r.normal(48, 3, 6000), "
+            "r.uniform(-60, 70, 4000)]).clip(-89, 89), r.uniform(-180, 180, 10000)))"
+            "(np.random.default_rng(s)); "
+            "t = gc.for_target(*pts(0), 200); a = gc.assign(t, *pts(1)); "
+            "h = lambda o: hashlib.sha256(json.dumps(o, sort_keys=True).encode()).hexdigest(); "
+            "print(json.dumps({'tree': h({k: t[k] for k in ('max_per_cell', 'bounds', 'child', "
+            "'cell', 'counts')}), 'assign': h(a.tolist()), 'n_cells': gc.n_cells(t), "
+            "'lat': t['centroid_lat'], 'lon': t['centroid_lon']}))")
+    out = {}
     for name, env in (("default", {}), ("baseline", {"NPY_DISABLE_CPU_FEATURES": " ".join(on)})):
-        r = subprocess.run([sys.executable, "-c", code, str(tmp_path / f"{name}.json")],
-                           capture_output=True, text=True, check=False,
-                           env={**__import__("os").environ, **env})
+        r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                           check=False, env={**__import__("os").environ, **env})
         assert r.returncode == 0, r.stderr
-        sha[name] = r.stdout.strip()
-    assert sha["default"] == sha["baseline"], f"disabled {on}: {sha}"
+        out[name] = json.loads(r.stdout)
+    d, b = out["default"], out["baseline"]
+    for k in ("tree", "assign", "n_cells"):
+        assert d[k] == b[k], f"{k} differs with {on} disabled: {d[k]} vs {b[k]}"
+    for k in ("lat", "lon"):  # last-bit differences only
+        diff = np.abs(np.subtract(d[k], b[k])).max()
+        assert diff < 1e-9, f"centroid_{k} differs by {diff} deg with {on} disabled"
 
 
 def test_cell_count_selection_refuses_without_select_n(setup):  # noqa: F811

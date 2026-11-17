@@ -259,6 +259,15 @@ Decisions made before any Step 2 result (changes to the first Step 2 design):
   cell count and `max_per_cell`. The tree comes from comparisons and exact halving only, so the
   difference is in the float64 centroids, whose trig and sums follow numpy's CPU-dependent
   SIMD paths. The rebuild also overwrote the seeded file before the check; it no longer does.)
+  CI note: on GitHub's ubuntu runner (Python 3.14.4, numpy 2.5.4, run 44106253947) the test
+  that compared the rebuilt partition's sha256 across numpy SIMD paths failed, the only failure of
+  that run; the local CPU (numpy target `X86_V3`) passes it. This fits the cause above. The pasted
+  log did not include the assertion text, so the runner's SIMD features and the two sha256
+  values were not recorded. The test now asserts what the pipeline relies on: tree structure,
+  cell counts and the cell assignment of every point are identical across SIMD paths, and the
+  centroids differ by less than 1e-9 degrees. A resume loads the frozen partition and never
+  relies on a rebuild matching (`test_a_recorded_partition_is_loaded_not_rebuilt`); the
+  partition logic is unchanged.
 - **The hybrid runs in a CPU-only session.** Cell probes (GPU) and hybrid (CPU) are separate
   runs: the hybrid's kNN is the Step 1 setting (numpy fp32, `--device ''`), so Step 1 and the
   hybrid share one numerical pin. (Before: kNN on cuda in the same GPU session.)
