@@ -5,6 +5,12 @@
 Where was a street photo taken? Three versions on [OpenStreetView-5M](https://huggingface.co/datasets/osv5m/osv5m), newest first.
 Each one reads its test split once, at the end.
 
+**Try it**
+- **[Coordinate demo](https://daggerabuse-geoguessr-ai.static.hf.space/coords.html) (V3):** runs in your
+  browser, your photo is not uploaded; ~350 MB first load, ~20 s per photo.
+- **[Country demo](https://huggingface.co/spaces/Daggerabuse/geoguessr-ai) (V1):** runs in your browser,
+  your photo is not uploaded; 101 MB first load.
+
 - **V3: coordinates.** Pre-registered. Frozen StreetCLIP vs CLIP L/14-336 backbones, scored in
   GeoScore (km) on the official test set.
 - **V2: StreetCLIP vs its CLIP L/14-336 base, 216 countries.** Pre-registered. Country top-1 with
@@ -12,8 +18,6 @@ Each one reads its test split once, at the end.
 - **V1: 33-country classification.** Zero-shot CLIP, linear probe and fine-tuning (LP-FT), with a
   browser demo.
 
-- **Live demo (runs in your browser):** https://huggingface.co/spaces/Daggerabuse/geoguessr-ai
-  (countries, V1) and [coords.html](https://daggerabuse-geoguessr-ai.static.hf.space/coords.html) (coordinates, V3)
 - **Model:** https://huggingface.co/Daggerabuse/geoguessr-clip-vitb16
 
 ## V3 (Phase 3): StreetCLIP vs CLIP L/14-336 in kilometres (OSV-5M test, pre-registered)
@@ -81,7 +85,7 @@ paragraph):
 
 ### V3 demo
 
-`web/coords.html` (same Space as the country demo) runs one V3 predictor in the browser: StreetCLIP
+[`web/coords.html`](https://daggerabuse-geoguessr-ai.static.hf.space/coords.html) (live; same Space as the country demo) runs one V3 predictor in the browser: StreetCLIP
 → the cell probe (zero-shot init, `nat`, N = 500K; the head of the test run, sha `2454e620…`) → softmax
 over the 5000 cells of the pre-registered partition → the top-5 cell centroids on an OpenStreetMap map.
 It is not the best V3 predictor: the hybrids also search the 500K training embeddings, which do not fit
