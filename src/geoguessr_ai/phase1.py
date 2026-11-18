@@ -25,6 +25,7 @@ from geoguessr_ai.zipq import aborted, load_zip_index, marker, stopped
 
 FULL_REPO = "Daggerabuse/osv5m-ft-archive"
 PILOT_REPO = FULL_REPO + "-pilot"
+BAL_REPO = FULL_REPO + "-bal"  # V4: bal_rank archive (ft_archive only, never this script's pipeline)
 N_TRAIN_ZIPS, N_TEST_ZIPS = 98, 5
 MODES = {
     "pilot": {"shards": [0, 1, 2], "deadline_min": 40, "repo": PILOT_REPO, "out": "pilot"},
@@ -32,6 +33,8 @@ MODES = {
              "out": "full"},
     "test": {"shards": list(range(N_TEST_ZIPS)), "deadline_min": 240, "repo": "", "out": "test",
              "source": "test"},
+    "bal": {"shards": list(range(N_TRAIN_ZIPS)), "deadline_min": 660, "repo": BAL_REPO,
+            "out": "bal"},
 }
 
 
@@ -46,9 +49,13 @@ def check_repo(mode: str, repo: str) -> None:
         raise SystemExit(f"full mode only uploads to {FULL_REPO}, not {repo}")
     if mode == "test" and repo:
         raise SystemExit(f"test mode uploads nothing, not to {repo}")
+    if mode == "bal" and repo != BAL_REPO:
+        raise SystemExit(f"bal mode only uploads to {BAL_REPO}, not {repo}")
 
 
 def config(mode: str) -> str:
+    if mode == "bal":  # its selector is bal_rank; kaggle_phase1.sh archives nat_rank
+        raise SystemExit("bal is ft_archive-only: use runs/kaggle_v4_bal_archive.ipynb")
     check_repo(mode, MODES.get(mode, {}).get("repo", ""))
     m = MODES[mode]
     shell = {"MODE": mode, "SHARDS": " ".join(map(str, m["shards"])),

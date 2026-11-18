@@ -1,6 +1,7 @@
 """Archive the raw JPEG bytes of the fine-tuning images (Phase 2) during the embedding pass.
 
-Images: nat_rank < --nat-max of train.csv, plus dev.csv and dev_seen.csv. They are taken
+Images: --rank-col (nat_rank, or bal_rank for V4's bal archive) < --rank-max (alias --nat-max)
+of train.csv, plus dev.csv and dev_seen.csv. They are taken
 byte for byte from the zips that zipq.py downloads (no re-encoding) and end up in ~1 GB
 ZIP_STORED parts with a sha256 manifest, uploaded to a PRIVATE Hugging Face dataset repo.
 
@@ -70,14 +71,14 @@ def sha256(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
 
-def wanted_ids(paths, nat_max: int) -> set[str]:
-    """ids of the CSVs; rows of a CSV with nat_rank only if nat_rank < nat_max."""
+def wanted_ids(paths, rank_max: int, rank_col: str = "nat_rank") -> set[str]:
+    """ids of the CSVs; rows of a CSV with rank_col only if rank_col < rank_max."""
     out: set[str] = set()
     for p in paths:
-        df = pd.read_csv(p, usecols=lambda c: c in ("id", "nat_rank"), dtype={"id": str},
+        df = pd.read_csv(p, usecols=lambda c: c in ("id", rank_col), dtype={"id": str},
                          keep_default_na=False)  # only these columns: no mixed-type warning
-        if "nat_rank" in df:
-            df = df[df["nat_rank"] < nat_max]
+        if rank_col in df:
+            df = df[df[rank_col] < rank_max]
         out |= set(df["id"])
     return out
 
@@ -116,7 +117,7 @@ def consume(args) -> None:
         check_repo(args.mode, args.repo)
         hub, _ = make_hub(args.repo, "", args.retries, args.backoff, args.log)
         hub.open()  # fails before any work if the token or the repo is wrong
-    want = wanted_ids(args.ids, args.nat_max)
+    want = wanted_ids(args.ids, args.rank_max, args.rank_col)
     opener = make_opener(args.zip_dir / "images")
     args.staging.mkdir(parents=True, exist_ok=True)
     for shard in args.shards:
@@ -387,7 +388,9 @@ def main(argv=None) -> None:
     sub = ap.add_subparsers(dest="cmd", required=True)
     c = sub.add_parser("consume")
     c.add_argument("--ids", type=Path, nargs="+", required=True)
-    c.add_argument("--nat-max", type=int, default=200_000)
+    c.add_argument("--rank-max", "--nat-max", dest="rank_max", type=int, default=200_000)
+    c.add_argument("--rank-col", choices=["nat_rank", "bal_rank"], default="nat_rank",
+                   help="bal_rank only with --mode bal (its own repo), nat_rank never with it")
     c.add_argument("--zip-dir", type=Path, required=True)
     c.add_argument("--index-dir", type=Path, required=True)
     c.add_argument("--source", default="train")
@@ -414,7 +417,9 @@ def main(argv=None) -> None:
     sm.add_argument("--work", type=Path, default=Path("data/ft_smoke"))
     args = ap.parse_args(argv)
     if args.cmd in ("consume", "upload") and args.repo and not args.mode:
-        ap.error("--repo needs --mode pilot|full")
+        ap.error("--repo needs --mode pilot|full|bal")
+    if args.cmd == "consume" and args.repo and (args.mode == "bal") != (args.rank_col == "bal_rank"):
+        ap.error("--rank-col bal_rank goes with --mode bal, and only there")
     try:
         if args.cmd == "consume":
             consume(args)

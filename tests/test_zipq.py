@@ -560,3 +560,14 @@ def test_wanted_ids_filters_nat_rank_only_where_present(tmp_path):
     pd.DataFrame({"id": ["NA"]}).to_csv(tmp_path / "d.csv", index=False)
     assert fa.wanted_ids([tmp_path / "t.csv", tmp_path / "d.csv"], 2) == {"a", "c", "NA"}
     assert np.array_equal(sorted(fa.wanted_ids([tmp_path / "t.csv"], 10)), ["a", "b", "c"])
+
+
+def test_wanted_ids_bal_rank_and_its_repo_guard(tmp_path):
+    pd.DataFrame({"id": ["a", "b", "c"], "nat_rank": [0, 5, 1], "bal_rank": [2, 0, 1]}).to_csv(
+        tmp_path / "t.csv", index=False)
+    assert fa.wanted_ids([tmp_path / "t.csv"], 2, "bal_rank") == {"b", "c"}
+    base = ["consume", "--ids", "t.csv", "--zip-dir", "z", "--index-dir", "i", "--shards", "0",
+            "--staging", "s", "--out", "o", "--repo", "Daggerabuse/osv5m-ft-archive-bal"]
+    for extra in (["--mode", "bal"], ["--mode", "full", "--rank-col", "bal_rank"]):
+        with pytest.raises(SystemExit):  # bal_rank and the bal repo only together
+            fa.main(base + extra)
