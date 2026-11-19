@@ -1,5 +1,5 @@
 {
-  "note": "DRAFT, not yet the V4 pre-dev note: the machine half of it (docs/V4_FEASIBILITY.md, sections 3-5). Fill inputs.*_sha256 after the bundle and the bal archive exist, review, then commit before any V4 training run. v4_train refuses to run unless this file is committed and unmodified; any change after a run starts changes the run key (a fresh run). Confirmed 2026-11-19: the seed-2 replicate (job 6) uses seed 43; the control's (job 7) head lr = 10 x that backbone's selected adapter lr (= its 50K full run's head lr).",
+  "note": "The V4 pre-dev note, machine half (docs/V4_FEASIBILITY.md, sections 3-5b). Inputs fixed 2026-11-19: bundle = Kaggle notebook notebook8c927d8f13 output; bal archive = Daggerabuse/osv5m-ft-archive-bal (539,906 images, 25 parts, 27.531 GB). v4_train refuses to run unless this file is committed and unmodified; any change after a run starts changes the run key (a fresh run). Confirmed 2026-11-19: the seed-2 replicate (job 6) uses seed 43; the control's (job 7) head lr = 10 x that backbone's selected adapter lr (= its 50K full run's head lr).",
   "option": "B-S2",
   "ordering": "bal",
   "backbones": {
@@ -51,9 +51,9 @@
   "n_boot": 1000,
   "inputs": {
     "geocells_sha256": "9882eb2ae7124f3331859bbf742a52c9d30fca517a31d16a83bfd77d6b74662b",
-    "bundle_manifest_sha256": null,
+    "bundle_manifest_sha256": "1fc4e0e5c1fc71f24948380ddc27f03b96c4b35f815e2e6a79d3f9b1900a27ca",
     "archive_repo": "Daggerabuse/osv5m-ft-archive-bal",
-    "archive_manifest_sha256": null
+    "archive_manifest_sha256": "0fe28db46b9dc2d14de689c6a55f25387bb66e5505cfaef90fec9e08e10d3752"
   },
   "runs_repo": "Daggerabuse/geoguessr-v4-runs",
   "jobs": [

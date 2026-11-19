@@ -699,11 +699,11 @@ Every config: StreetCLIP and L/14-336 at the same time, one per GPU, LoRA r = 16
   pre-registration is committed and unmodified (as `phase3_final`). The test zips are staged in
   that session only.
 
-## 5b. Training pipeline (code ready, no run yet; 2026-11-19, before any V4 dev result)
+## 5b. Training pipeline (code ready, inputs fixed, no training run yet; 2026-11-19, before any V4 dev result)
 
 **Files.**
-- `configs/v4_predev.json`: the machine half of the pre-dev note, still a draft. The bundle and
-  archive sha256s are filled in after those exist; the trainer refuses a null value.
+- `configs/v4_predev.json`: the machine half of the pre-dev note, with the input sha256s filled in
+  (below). The trainer refuses a null value.
 - `src/geoguessr_ai/v4_inputs.py`: the inputs bundle.
 - `src/geoguessr_ai/v4_train.py`: `train`, `identity`, `stage` and `hfcheck`.
 - `src/geoguessr_ai/v4_select.py`: the section 5 rules.
@@ -717,6 +717,18 @@ Every config: StreetCLIP and L/14-336 at the same time, one per GPU, LoRA r = 16
   Every file is sha-checked against its V3 source, and a `MANIFEST.sha256` whose own sha256 is in
   the config;
 - its own previous output, to resume.
+
+**Fixed inputs (2026-11-19, both CPU sessions at commit f538707).**
+- Inputs bundle: the output of Kaggle notebook `notebook8c927d8f13`. `MANIFEST.sha256` =
+  `1fc4e0e5c1fc71f24948380ddc27f03b96c4b35f815e2e6a79d3f9b1900a27ca`. The downloaded copy passes
+  `verify_bundle` locally (10 files). The training notebook also asserts the attached bundle comes
+  from `notebook8c927d8f13` (`INPUTS_NAME`).
+- Bal archive: `Daggerabuse/osv5m-ft-archive-bal` (private), built by Kaggle notebook
+  `notebook5109c74927`. 539,906 images in 25 parts, 27.531 GB; none missing, none extra, no
+  duplicates. `manifest.csv` sha256 =
+  `0fe28db46b9dc2d14de689c6a55f25387bb66e5505cfaef90fec9e08e10d3752`, computed from the downloaded
+  copy; the copy re-fetched from the repo has the same sha256.
+- Partition (unchanged): `9882eb2ae7124f3331859bbf742a52c9d30fca517a31d16a83bfd77d6b74662b`.
 
 The bundle is built in a CPU session from the Phase 1 output. That is the only session that has
 test.csv mounted, and it never opens it. The training preflight refuses any other input and any
