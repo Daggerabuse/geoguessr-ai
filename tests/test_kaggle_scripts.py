@@ -19,8 +19,11 @@ LINUX = pytest.mark.skipif(BASH is None or (sys.platform != "linux"
 
 STUB = r"""#!/usr/bin/env bash
 # fake python: logs each geoguessr_ai call, stubs the GPU work, runs everything else for real
-out=; prev=
-for a in "$@"; do [ "$prev" = --out ] && out=$a; prev=$a; done
+out=; parts=; bb=; v4stop=; prev=
+for a in "$@"; do
+  case $prev in --out) out=$a ;; --parts) parts=$a ;; --backbone) bb=$a ;; --stop-file) v4stop=$a ;; esac
+  prev=$a
+done
 case " $* " in
   *" -m geoguessr_ai."*) echo "$*" >> "$STUB_LOG" ;;
 esac
@@ -42,6 +45,16 @@ case " $* " in
       [ -e "$stop" ] && { echo "RESUME NEEDED: stub stopped"; exit 3; }
     fi
     echo "P3 RAN" ;;
+  *" geoguessr_ai.v4_train hfcheck "*) [ -z "${STUB_HF_FAIL:-}" ] || exit 1; echo "hf write ok" ;;
+  *" geoguessr_ai.v4_train stage "*) mkdir -p "$parts"; echo "id,part" > "$parts/manifest.csv"; touch "$parts/STAGED" ;;
+  *" geoguessr_ai.v4_train identity "*)
+    echo "{\"ok\": $([ "${STUB_ID_BAD:-}" = "$bb" ] && echo false || echo true)}" > "$out/identity_$bb.json" ;;
+  *" geoguessr_ai.v4_train train "*)
+    if [ -n "${STUB_P3_WAIT:-}" ]; then
+      for _ in $(seq 1 100); do [ -e "$v4stop" ] && break; sleep 0.1; done
+      [ -e "$v4stop" ] && { echo "RESUME NEEDED: stub stopped"; exit 3; }
+    fi
+    echo "TRAIN RAN $bb" ;;
   *" -m geoguessr_ai."*) echo "unexpected: $*" >&2; exit 9 ;;
   *) exec "$REAL_PY" "$@" ;;
 esac
@@ -224,3 +237,73 @@ def test_phase3_seed_from_copies_a_finished_output_and_refuses_ambiguous_ones(tm
     (out / "x").write_text("")
     r = _bash("kaggle_phase3.sh", _env_again(tmp_path, inp, SEED_FROM=seed.as_posix()))
     assert r.returncode == 1 and "not empty" in r.stdout
+
+
+def _v4_env(tmp_path, **extra):
+    env = _env(tmp_path, **extra)
+    bundle = tmp_path / "kaggle" / "input" / "v4-inputs"
+    bundle.mkdir(parents=True)
+    (bundle / "MANIFEST.sha256").write_text("")
+    return env
+
+
+def _v4_calls(tmp_path, what):
+    return [c for c in _calls(tmp_path) if f"v4_train {what}" in c]
+
+
+@LINUX
+def test_v4_hf_check_identity_then_pairs_on_the_declared_gpus(tmp_path):
+    r = _bash("kaggle_v4.sh", _v4_env(tmp_path, JOBS="1 2"))
+    out = r.stdout + r.stderr
+    assert r.returncode == 0, out[-3000:]
+    calls = _calls(tmp_path)
+    assert "v4_train hfcheck" in calls[0] and "v4_train stage" in calls[1]
+    ident = {c.split("--backbone ")[1].split()[0]: c.split("--device ")[1].split()[0]
+             for c in _v4_calls(tmp_path, "identity")}
+    assert ident == {"streetclip": "cuda:1", "clip_l14_336": "cuda:0"}  # the first job's GPUs (k = 1)
+    train = _v4_calls(tmp_path, "train")
+    assert len(train) == 4 and all("--device auto" in c and "--stop-file" in c for c in train)
+    assert [c.split("--job ")[1].split()[0] for c in train] == ["1", "1", "2", "2"]
+    assert out.count("TRAIN RAN") == 4 and "(exit 0" in out
+
+
+def _v4_env_again(tmp_path, **extra):
+    return {**_env_again(tmp_path, tmp_path / "unused"), **extra}
+
+
+@LINUX
+def test_v4_refuses_to_train_without_hf_write_or_a_passed_identity(tmp_path):
+    r = _bash("kaggle_v4.sh", _v4_env(tmp_path, JOBS="0", STUB_HF_FAIL="1"))
+    assert r.returncode == 1 and "WRITE access" in r.stdout
+    assert not _v4_calls(tmp_path, "stage") and not _v4_calls(tmp_path, "train")
+    (tmp_path / "calls.log").unlink()
+    r = _bash("kaggle_v4.sh", _v4_env_again(tmp_path, JOBS="0", STUB_ID_BAD="clip_l14_336"))
+    assert r.returncode == 1 and "identity check failed for clip_l14_336" in r.stdout
+    assert not _v4_calls(tmp_path, "train")
+
+
+@LINUX
+def test_v4_deadline_stops_the_pair_and_exits_3(tmp_path):
+    r = _bash("kaggle_v4.sh", _v4_env(tmp_path, JOBS="0 1", DEADLINE_MIN="0.02", STUB_P3_WAIT="1"))
+    out = r.stdout + r.stderr
+    assert r.returncode == 3, out[-3000:]
+    assert "DEADLINE: STOP written" in out and "RESUME NEEDED after job 0" in out
+    assert [c.split("--job ")[1].split()[0] for c in _v4_calls(tmp_path, "train")] == ["0", "0"]
+    assert "(exit 3" in (tmp_path / "kaggle/working/v4_runs/quota_times.txt").read_text()
+
+
+@LINUX
+def test_v4_seed_from_must_be_a_v4_output(tmp_path):
+    seed = tmp_path / "kaggle/input/prev/v4_runs"
+    env = _v4_env(tmp_path, JOBS="0", SEED_FROM=seed.as_posix())
+    seed.mkdir(parents=True)
+    r = _bash("kaggle_v4.sh", env)
+    assert r.returncode == 1 and "not a v4_runs output" in r.stdout and not _calls(tmp_path)
+    (seed / "quota_times.txt").write_text("session_start_utc x\n")
+    for bb in ("streetclip", "clip_l14_336"):
+        (seed / f"identity_{bb}.json").write_text('{"ok": true}')
+    (seed / "STOP").write_text("")
+    r = _bash("kaggle_v4.sh", _v4_env_again(tmp_path, JOBS="0", SEED_FROM=seed.as_posix()))
+    assert r.returncode == 0, (r.stdout + r.stderr)[-3000:]
+    assert not _v4_calls(tmp_path, "identity")  # carried over from the seed
+    assert not (tmp_path / "kaggle/working/v4_runs/STOP").exists()

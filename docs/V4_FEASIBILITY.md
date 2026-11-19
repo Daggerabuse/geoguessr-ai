@@ -22,6 +22,15 @@ does that depend on N (asked: 50K vs 500K)? The metric stays GeoScore, with the 
   The latter fits from 11.3 img/s (57 h at 12).
 - The pilot (2.5 h) decides which one by a rule fixed in advance.
 
+**After the pilot (run 2026-11-18, 1 h 27 min; section 4b).**
+- **Config:** LoRA on the **last 12 blocks** (decision 6, chosen on speed only, before any dev
+  result).
+- **Rate:** r = **16.0 img/s**, the slower GPU's real-data train rate.
+- **Option:** the rule picks **B-S2**: 50K vs **500K**, with a short-horizon lr search at 50K.
+- **Budget:** 49.8 quota h, **59.2 h** with the lost-session reserve. That is just inside 60.
+- The all-blocks configs are slower: 8.0 img/s with checkpointing, about 10.9 without. With them
+  the rule picks option A (50K only, no N comparison).
+
 **Decisions (2026-11-18, before any V4 run or dev result).**
 1. **N:** 50K vs 200K (B-full-200) is accepted as the answer if the pilot-rate rule (section 3)
    selects it. The rule itself is unchanged.
@@ -29,8 +38,14 @@ does that depend on N (asked: 50K vs 500K)? The metric stays GeoScore, with the 
    (`runs/kaggle_v4_bal_archive.ipynb`, section 1).
 3. **Equivalence margin for "keep": 40 GeoScore**, fixed with its reasoning in section 5.
 4. **Head lr = 10× the adapter lr**, fixed.
-5. **Quota:** a T4×2 session costs 1 quota h per wall-clock hour. This is observed, not assumed
+5. **Quota:** a T4×2 session costs 1 quota h per wall-clock hour. **Confirmed** by the pilot
    (section 2).
+6. **LoRA config: r = 16 on q,k,v,out_proj of the last 12 of 24 blocks**, for both backbones.
+   This replaces the a-priori "all 24 blocks". The reasoning, and what it can and cannot answer,
+   are in section 4b.
+7. **GPU assignment:** the backbones alternate between the two GPUs in a fixed, declared pattern
+   (section 4b).
+8. **BAL_MAX = 500,000** for the bal archive (B-S2 needs bal_500K).
 
 ## 1. Data
 
@@ -67,9 +82,9 @@ does that depend on N (asked: 50K vs 500K)? The metric stays GeoScore, with the 
     V4 trains on exactly V3's subsets.
 - **Checks at the end:** manifest = wanted ids exactly (no duplicate, missing or extra id), every
   part uploaded, the remote manifest byte-equal, the repo private.
-- **BAL_MAX** = 200,000 for B-full-200. If the pilot's rule picks B-S1 or B-S2, it is 500,000
-  (about 28 GB).
-- **Run it after the pilot**, so BAL_MAX is known.
+- **BAL_MAX = 500,000** (decision 8): the rule picked B-S2. That is bal_500K + dev, about 28 GB.
+  It would have been 200,000 for B-full-200.
+- The notebook is set to 500,000 and is ready to run now that the pilot is done.
 - **Packing order:** the parts are packed in shard order, so a 50K session stages the whole
   archive. At 200K that is ≈ 12.4 GB, a few minutes per session. Packing in rank order, with dev
   in its own parts, would only pay off at 500K. It is not done.
@@ -117,7 +132,9 @@ does that depend on N (asked: 50K vs 500K)? The metric stays GeoScore, with the 
   blur and erasing. **Estimate: 45–60 ms/image under contention.**
 - Load: 2 runs × 12–17 img/s × 50 ms ≈ 1.2–1.7 cores for decoding, plus about 1 core per training
   process. A partner in an eval phase (33 img/s × 45 ms ≈ 1.5 cores) adds more.
-- **That is about 3.5–4 cores of 4: the loader can become the bottleneck.**
+- **That is about 3.5–4 cores of 4: the loader can become the bottleneck.** The pilot disproved
+  this estimate: the CPU was 43% idle on average, the loader ran ≫ the training rate, and no
+  fallback is needed (section 4b).
 - The pilot measures it: 2 vs 3 workers, a train-while-the-other-evaluates phase, `vmstat`
   throughout.
 - Fallbacks, in this order and declared before the pilot:
@@ -139,12 +156,14 @@ does that depend on N (asked: 50K vs 500K)? The metric stays GeoScore, with the 
 | **full** fine-tuning, batch 16, AMP, grad checkpointing, AdamW | 8.3 img/s, 6.86 GB peak | 7.9 img/s |
 | real pipeline inference (decode included, GPU-bound) | 35.3 img/s (`runs/phase0/emb`) | 32.7 img/s (`runs/pilot`, cuda:1) |
 
-- The budget uses **33 img/s per T4 for any evaluation or re-embedding**.
+- The budget now uses the pilot's **29.3 img/s per T4 for any evaluation or re-embedding**. That
+  is the real-data eval rate of the last-12 config on the slower GPU (section 4b). The first draft
+  used 33.
 - **StreetCLIP and L/14-336 have the same architecture, yet StreetCLIP measured 10–20% slower
-  every time.** Backbone and GPU, run order and temperature are confounded in these numbers. The
-  pilot swaps the GPUs for one config and logs SM clock, temperature and power every 10 s.
-- The budget uses the **slower backbone's** rate, because a pair of runs lasts as long as its
-  slower half.
+  every time.** The pilot's swapped run shows that this is the **GPU, not the backbone**
+  (section 4b).
+- The budget uses the **slower GPU's** rate, because a pair of runs lasts as long as its slower
+  half.
 
 **LoRA cost model, calibrated on the measured full fine-tuning step.**
 - In theory a full fine-tuning step with checkpointing costs about 4 forward passes. The measured
@@ -164,6 +183,13 @@ does that depend on N (asked: 50K vs 500K)? The metric stays GeoScore, with the 
   gradient.
 - A rate below P is possible. The decision rule below covers every rate down to 6.9 img/s, and
   below that it stops.
+- **Measured** (pilot, real data, slower / faster GPU; section 4b):
+  - all 24 blocks with checkpointing: 8.0 / 9.2;
+  - all 24 blocks without checkpointing: about 10.9 / 12.6. This is synthetic only, but real data
+    matched synthetic within 3% wherever both were measured;
+  - last 12 blocks: 16.0 / 18.7.
+
+  The estimates were 9 / 12 / 17, about 10% optimistic.
 
 **Memory (estimate, per T4, 15 GB usable).**
 - Fixed costs:
@@ -184,16 +210,24 @@ does that depend on N (asked: 50K vs 500K)? The metric stays GeoScore, with the 
   change speed and memory, not the maths (up to fp16 numerics). The pilot picks them, which is a
   throughput-only choice.
 - If C needs micro-batch ≤ 12, its rate drops toward P.
+- **Measured peak memory** (pilot):
+  - all 24 blocks without checkpointing: 9.7 GB at micro-batch 16, 14.3 GB at 24. The estimate
+    above was too high; 16 is safe.
+  - with checkpointing: 2.3 GB at 16, 3.9 GB at 32.
+  - last 12 blocks: 5.4 GB at 16, 10.0 GB at 32.
+  - **Adding fc1/fc2 to the targets (all 24 blocks, no checkpointing, micro-batch 16) ran out of
+    memory on both GPUs** (10.9M trainable parameters). It was not tried with checkpointing or a
+    smaller batch. MLP targets are not part of any V4 config.
 
-**Fixed a priori (not chosen by the pilot).**
-- LoRA r=16, alpha=16, on q,k,v,out_proj of **all 24 blocks**, for both backbones. Same
-  architecture, so the trainable parameter count is identical.
-- Last-12 is faster, but it is a capacity choice, not a speed setting. It is only listed as an
-  alternative.
+**Fixed a priori, then changed once after the pilot (decision 6; section 4b).**
+- The a-priori config was LoRA r=16, alpha=16, on q,k,v,out_proj of **all 24 blocks**. The first
+  draft called last-12 "a capacity choice, not a speed setting, listed only as an alternative".
+- After the pilot, and before any V4 dev result, it became **the last 12 blocks**, for both
+  backbones. The trainable parameter count is identical: 1.57M adapter + 3.85M head = 5.42M.
 
 **Layout: two independent runs per session, not DDP.**
-- One run per GPU, the two backbones side by side at the same lr. Example: StreetCLIP lr_i on
-  `cuda:0` and L/14-336 lr_i on `cuda:1`.
+- One run per GPU, the two backbones side by side at the same lr. Which backbone runs on which
+  GPU alternates in a fixed pattern (section 4b).
 - There is no gradient sync and no change to batch semantics, and the pattern is already used
   (Phase 1).
 - Both halves of a pair share the session, hardware and CPU contention.
@@ -208,8 +242,10 @@ does that depend on N (asked: 50K vs 500K)? The metric stays GeoScore, with the 
   2026-11-18, about 18 h of T4×2 sessions left about 11–12 of the 30 h, i.e. about 18–19 quota h
   were used. At 2× they would have used about 36 h, more than the weekly quota. I found no official
   statement either way.
-- The budget therefore counts session wall-clock hours. The pilot's `quota_times.txt` (batch
-  only, asserted) confirms it once more.
+- **Confirmed by the pilot.** Its batch session ran 13:40:46–15:08:09 UTC (1 h 27 min,
+  `quota_times.txt`). The quota went from about 11 h to 9 h 28 min, i.e. about 1.5 quota h were
+  used. At 2× it would have been about 2.9 h.
+- The budget counts session wall-clock hours.
 - Rules: batch sessions only; a deadline stop before 12 h; checkpoints every 30 min, also pushed
   to HF.
 
@@ -221,19 +257,21 @@ it):
     dev_seen (19,906; diagnostic);
   - two intermediate checkpoints on a 5K dev_unseen subset (diagnostic only).
 
-  That is 0.42 h per run at 33 img/s. The first draft had five full dev_seen evals, 1.0 h.
+  That is 0.47 h per run at the measured 29.3 img/s. The first draft had five full dev_seen
+  evals, 1.0 h.
 - **Sessions:** a job uses whole sessions of ≤ 11 h. A longer job resumes in the next session and
   pays the setup again: 0.25 h for clone, pip, two model downloads of about 1.7 GB each, data
   staging and preflight.
 - **Reserve:** one lost session (min(job, 11 h) + 0.25 h). It replaces the first draft's flat
   10%, which was less than one failed session.
 - **Fixed costs:**
-  - the pilot, 2.5 h;
+  - the pilot, 1.5 h (measured; planned 2.5);
   - a zero-init equality check, once per backbone on 2K dev_unseen images (minutes);
   - the augmented-frozen control at 50K (section 3);
   - the 50K hybrid re-embedding: 50K train images per model. The dev embeddings are stored by the
     final eval, so there is no second dev pass;
-  - **the later test pass:** 4 models × 210,122 images at 33 img/s ≈ 7.1 wall h (3.5 quota h).
+  - **the later test pass:** 4 models × 210,122 images at 29.3 img/s ≈ 8.0 GPU h, i.e. 4.0 quota h
+    as two pairs.
     The test zips (9.4 GB) are staged in that session only.
 - **Not needed** (unlike V3): a retrain for the test run. The adapters and heads are small and are
   saved with sha256, so the test run loads exactly the dev-selected weights.
@@ -243,7 +281,8 @@ it):
   - the sampler's permutation seed and position: an index sampler skips without decoding;
   - torch/numpy RNG.
 
-  Estimate: about 85 MB. The pilot times a round trip.
+  Measured: 65 MB (last 12 blocks) or 84 MB (all blocks), with a save/load round trip of
+  0.2–0.5 s.
 
 ## 3. Design options and an honest budget
 
@@ -273,8 +312,9 @@ Common to all options:
   from "augmentation + more head training". V3's heads were trained on non-augmented center
   crops, and that effect need not cancel in the gap. Cost: one forward-only pair.
 
-**Budget** (`uv run python scripts/v4_budget.py [--seen S] [--rate r…]`). Quota h for P / C / O
-(9 / 12 / 17 img/s per T4), **including the one-lost-session reserve**:
+**Budget before the pilot** (estimated rates, eval 33 img/s, pilot 2.5 h; kept as written). The
+measured budget follows the decision rule below. Quota h for P / C / O (9 / 12 / 17 img/s per
+T4), **including the one-lost-session reserve**:
 
 | Option | Jobs (pairs = both backbones) | S | P | C | O | break-even for 60 h |
 |---|---|---|---|---|---|---|
@@ -325,20 +365,57 @@ images, all-blocks config):
 | 6.9 – 11.3 | **A** (50K only, with seed 2 and the control) |
 | < 6.9 | stop; rethink (e.g. the last-12-blocks config, a third week) |
 
-- My expectation (C ≈ 12) lands in **B-full-200**. 50K vs 200K is accepted as the answer
-  (decision 1). The alternative, B-S2 at the cost of a third week (72 h at C), is not taken.
+- Before the pilot, my expectation (C ≈ 12) landed in B-full-200, which decision 1 accepted.
 - Unused reserve hours (no lost session, no edge extension) buy a seed-2 replicate at 50K,
   declared now. The resulting seed estimate is therefore conditional on no edge binding.
 
-**Weekly packing (B-full-200 at C).** Pairs take about 5 h (two per session). The order is a
-strict chain:
+**The rule applied (2026-11-18, after the pilot, before any V4 dev result).**
+- The rule names "the all-blocks config". The config choice was opened again before applying it
+  (decision 6, section 4b), because no config fits as declared:
+  - all blocks with checkpointing (cell 4a): r = 8.0;
+  - all blocks without checkpointing: about 10.9.
+  - Checkpointing is a throughput-only choice, so the declared config at its best gives r ≈ 10.9:
+    option A.
+- **With the chosen last-12 config, r = 16.0** (slower GPU, real data, 3000 images; the sustained
+  run with checkpointing matched its short run exactly). **15.6 ≤ 16.0 < 19.0, so the rule picks
+  B-S2.**
+- **Recomputed with the measured inputs** (eval 29.3 img/s, pilot 1.5 h), the break-evens are:
+  B-S2 15.8, B-full-200 11.4, A (S = 200K) 6.9, B-S1 19.2. 16.0 still selects B-S2, but by only
+  0.2 img/s. The declared thresholds are applied as written, and they give the same answer.
 
-1. Week 1, about 30 h: the pilot; the CPU staging session; then the 50K search (3 pairs) and the
-   200K search (3 pairs).
-2. Week 2, about 27 h: the edge extension (if any); the control; the 50K hybrid; the dev
-   analysis; the V4 test pre-registration; the test pass.
+**Measured budget, B-S2 at r = 16.0** (`uv run python scripts/v4_budget.py`):
 
-The 30 h weekly cap will split a session somewhere. Budget per week, not just in total.
+| Job (pairs, both backbones) | each | quota h |
+|---|---|---|
+| short lr search at 50K, 100K images seen: 3 lr + 1 edge | 2.11 h + 0.25 setup | 9.4 |
+| full runs, 500K images seen: 50K at the selected lr, 500K at the same lr, seed 2 at 50K | 9.15 h + 0.25 | 28.2 |
+| augmented-frozen control (forward-only, 500K seen) | 5.21 + 0.25 | 5.5 |
+| 50K hybrid re-embedding | 0.47 + 0.25 | 0.7 |
+| test pass, 4 models (2 pairs) | 1.99 + 0.25 | 4.5 |
+| pilot (done) | | 1.5 |
+| **total** | | **49.8** |
+| + one lost 9.4 h session (reserve) | | **59.2** |
+
+- **It fits 60 h only with no slack beyond the reserve.** If the sustained rate falls to 15.8 the
+  total is 59.8 h; at 15.0 it is 62.0 h.
+- The rule is not re-applied after the first real hour (section 4). If the real rate comes in
+  lower, the reserve is spent first. Then the declared seed-2 run at 50K is dropped: it is
+  descriptive only.
+- The large N is the asked-for **500K**, seen once. Decision 1's 50K vs 200K fallback is not
+  needed.
+
+**Weekly packing (B-S2 at 16.0).** This is a strict chain; each full pair fills one session.
+1. **Before any GPU run:** the bal_500K archive (CPU, no quota) and the committed V4 pre-dev note.
+2. **Week 1, about 28.2 h:**
+   - the 4 short search pairs (2 per session, about 9.4 h);
+   - the 50K full pair and the 500K full pair (one session each).
+3. **Week 2, about 20 h plus the reserve:**
+   - seed 2 at 50K, the control and the hybrid;
+   - the dev analysis and the V4 test pre-registration;
+   - the test pass.
+
+This week has 9 h 28 min left. That is just enough for the 4 short pairs (9.4 h), with no
+margin. Starting them next week is safer.
 
 **Ordering: bal (decision 2).** One ordering only; both would double every cost.
 - **The reason given for the decision:** "does fine-tuning close the lead" needs a lead. On V3
@@ -364,7 +441,7 @@ The 30 h weekly cap will split a session somewhere. Budget per week, not just in
 - Merged export: `LoRALinear.merged` sums in fp32. A merged model must give the same top-1 cells
   as the unmerged one before it is used.
 
-## 4. Pilot (≤ 2.5 quota h, prepared, not run)
+## 4. Pilot (≤ 2.5 quota h; run 2026-11-18, 1 h 27 min, all steps exit 0; results in 4b)
 
 Notebook: `runs/kaggle_v4_pilot.ipynb`. GPU T4×2, internet on, secret `HF_TOKEN`, **no
 inputs**, **batch only**.
@@ -418,12 +495,124 @@ Pilot limits:
 - The first real run's first hour is the true check. Its rate is logged, and the rule is not
   re-applied after it: the option is fixed by the pilot.
 
+## 4b. Pilot results (2026-11-18)
+
+Outputs: `runs/v4_pilot/v4_pilot/`, git-ignored:
+- `bench_v4.jsonl` and `bench_v4_summary.csv`;
+- `gpu_monitor.csv`, `cpu_vmstat.log`;
+- `downloads.json`, `quota_times.txt`.
+
+Every config: StreetCLIP and L/14-336 at the same time, one per GPU, LoRA r = 16 unless noted, a
+5000-class head with CE, micro-batch 16 unless noted. Rates are img/s per T4.
+
+| config | data | cuda:0 (slower) | cuda:1 | peak GB |
+|---|---|---|---|---|
+| all 24 blocks + checkpointing | synthetic | 7.9 | 9.2 | 2.3 |
+| ″, real images, 2 / 3 workers | e2e train | 8.0 / 8.0 | 9.1 / 9.2 | |
+| ″, sustained 8,000 images (cell 4a) | e2e train | **8.0** | 9.2 | |
+| ″, micro-batch 32 | synthetic | 8.0 | 9.3 | 3.9 |
+| all 24 blocks, no checkpointing | synthetic | **10.9** | 12.6 | 9.7 |
+| ″, micro-batch 24 | synthetic | 11.0 | 12.9 | 14.3 |
+| ″, rank 8 | synthetic | 10.9 | 12.7 | 9.7 |
+| ″, + fc1/fc2 targets | synthetic | **OOM** | **OOM** | |
+| **last 12 blocks**, no checkpointing | synthetic | 16.4 | 19.3 | 5.4 |
+| ″, real images, 2 workers | e2e train | **16.0** | 18.7 | |
+| ″, micro-batch 32 | synthetic | 16.2 | 19.3 | 10.0 |
+| eval with LoRA, real images (all / last 12) | e2e eval | 26.4 / **29.3** | 30.9 / 34.6 | |
+| mixed: cuda:0 evaluates while cuda:1 trains | e2e | 26.4 eval | 9.2 train | |
+
+- **Real data matches synthetic.** The loader delivers 92–141 img/s of `train_view` images with
+  2–3 workers, ≫ 16 needed.
+- **CPU:** over the session 39% user, 17% system, 43% idle. It was < 10% idle in 21 of 524
+  samples.
+  - The CPU is not the bottleneck at these rates, and the decode fallbacks (section 1) are not
+    needed.
+  - 2 workers per run.
+  - Training next to an eval did not slow either side.
+- **Staging:**
+  - HF archive parts arrived at 101–286 MB/s, and one OSV-5M train zip (2.5 GB) at 240 MB/s. A
+    28 GB bal_500K staging therefore takes about 2–5 min.
+  - `df` reports no separate `/kaggle/temp` mount. It is a directory on the root overlay (8 TB,
+    965 GB free).
+- **Checkpoint:** 65 MB (last 12) or 84 MB (all), with a round trip of 0.2–0.5 s.
+- **Rank:** 8 vs 16 does not change speed. r = 16 stays.
+- **MLP targets:** adding fc1/fc2 ran out of memory on both GPUs (all blocks, no checkpointing,
+  micro-batch 16, 10.9M trainable). It was not retried with checkpointing or a smaller batch,
+  since V4's targets are q,k,v,o by declaration.
+- **Quota:** 1 h 27 min of session cost about 1.5 quota h, so a T4×2 session counts **1×**
+  (section 2).
+
+**GPU asymmetry: the GPU, not the backbone.**
+- **The swapped run decides it.** StreetCLIP ran at 7.9 on cuda:0 and 9.6 on cuda:1. L/14-336 ran
+  at 9.2 on cuda:1 and 8.0 on cuda:0.
+- **cuda:0 is 13–17% slower in every config**, whichever backbone runs on it. The earlier "StreetCLIP
+  is 10–20% slower" was this confound.
+- **`gpu_monitor.csv`** (samples at ≥ 80% utilisation; 443 on cuda:0, 412 on cuda:1):
+  - both GPUs ran at ≈ 100% utilisation and **67–68 W**, i.e. at the T4's 70 W power cap;
+  - at that same power, **cuda:0's SM clock had a median of 630 MHz vs 855 MHz** on cuda:1
+    (−26%; both far below the 1590 MHz boost);
+  - cuda:0 ran hotter: median 77 °C vs 76 °C, mean 77 vs 74.
+  - It is steady, not a warm-up effect: 10-min means were 593–654 vs 807–893 MHz over the whole
+    87 min.
+- **Interpretation:** both cards are power-limited, and cuda:0 needs more power per MHz (a hotter
+  card leaks more, or chip-to-chip variation), so the cap holds it lower. It is a property of
+  this machine's card, not of the code or the backbone. Another session may get another machine,
+  and the slower card may be the other index.
+
+**GPU assignment rule (decision 7, declared now).**
+- **The GPU affects speed, not results.** Both cards are T4s running the same code and seeds. The
+  rule only keeps hardware from lining up with a backbone, and the budget honest.
+- **Alternate in a fixed pattern.** Number the pair jobs k = 0, 1, 2, … in the order the pre-dev
+  note lists them. In job k, StreetCLIP runs on `cuda:(k mod 2)` and L/14-336 on the other GPU.
+  - In B-S2, the 4 short search pairs then put each backbone twice on each GPU.
+  - The 50K and 500K full pairs are consecutive, so each backbone has one N on each GPU.
+  - The pattern is fixed in advance, never chosen by observed speed.
+- **Log it.** Every run records the GPU index, its `nvidia-smi` UUID, and the 10 s clock /
+  temperature / power monitor. A hardware effect can then be checked afterwards: GeoScore should
+  not depend on the GPU.
+- **Budget at the slower card.** A pair lasts as long as its slower run, so the faster GPU idles
+  about 15% of each job (about 1.3 h in a 9.15 h full pair). Filling that time (e.g. evaluating
+  the partner's checkpoints on it) is not worth the coupling.
+
+**LoRA config: last 12 blocks (decision 6, 2026-11-18, before any V4 dev result).**
+- **Why speed may decide it here.** The pilot used dummy labels: no loss value was compared, and
+  no accuracy, GeoScore or dev number exists. A choice made now cannot be tuned to the outcome,
+  and it is recorded with its date. It does change an a-priori setting (section 2), and that is
+  declared.
+- **The two candidates, by the rule:**
+  - **All 24 blocks, no checkpointing:** r ≈ 10.9 gives **option A**: 50K only, 4 epochs, seed 2,
+    the control, about 42 h. It answers close / keep / reverse at 50K with full-depth adaptation,
+    but **not the N question**, half of what V4 asks.
+  - **Last 12 blocks:** r = 16.0 gives **option B-S2**: 50K vs the asked-for 500K, about 59 h. It
+    answers both halves, at the price of adapting only the upper half and a short-horizon lr
+    search.
+- **Chosen: last 12 blocks.** Only this config answers the N question within two weeks, and it
+  keeps N = 500K.
+- **What last-12 can answer.** Whether adapting the upper 12 blocks of each encoder (with the
+  LP-FT head) closes, keeps or reverses StreetCLIP's lead, and how that changes from 50K to 500K.
+  - Both backbones get exactly the same adaptable capacity: the same blocks, rank and parameter
+    count (1.57M adapter + 3.85M head).
+  - The frozen lower half is V3's. The zero-init identity check still applies.
+- **What it cannot answer.**
+  - **Full-depth fine-tuning.** The lower 12 blocks stay frozen. Whatever StreetCLIP's
+    geolocation pretraining changed there stays in StreetCLIP and cannot be learned by L/14-336:
+    low-level, local features such as textures, road markings, script shapes and camera traits.
+    If the lead lives there, last-12 is **biased toward "keep"**.
+  - So a "keep" is weaker evidence than a "close" or a "reverse". The conclusion is worded as
+    "LoRA on the upper 12 blocks", never "fine-tuning" in general.
+  - A "close" says that upper-half adaptation was enough. It does not say what full-depth
+    adaptation would do, since the same lr need not suit a deeper adapter.
+  - Which layers carry the lead is not answered.
+- **The all-blocks question** (option A's design at 50K, about 42 h at r ≈ 10.9) stays a possible
+  follow-up. It is not part of V4.
+
 ## 5. What a V4 pre-registration must fix, and dev-only tuning rules
 
 **Before any V4 training run** (a dated pre-dev note, committed):
 - The option (by the rule in section 3, from the pilot's r), ordering, N values, S, and the
   checkpoint schedule.
-- The LoRA config (r, alpha, targets, blocks), optimizer, warmup, cosine, effective batch, weight
+- The GPU assignment pattern (section 4b) and the pair-job order it is keyed to.
+- The LoRA config (r = 16, alpha = 16, q,k,v,out_proj, **last 12 blocks**), optimizer, warmup, cosine, effective batch, weight
   decay per parameter group, head-lr multiplier, and augmentation (V1's `train_view`, no flip,
   no hue).
 - The head init file and its sha256 per cell; the partition sha256.
@@ -510,16 +699,102 @@ Pilot limits:
   pre-registration is committed and unmodified (as `phase3_final`). The test zips are staged in
   that session only.
 
+## 5b. Training pipeline (code ready, no run yet; 2026-11-19, before any V4 dev result)
+
+**Files.**
+- `configs/v4_predev.json`: the machine half of the pre-dev note, still a draft. The bundle and
+  archive sha256s are filled in after those exist; the trainer refuses a null value.
+- `src/geoguessr_ai/v4_inputs.py`: the inputs bundle.
+- `src/geoguessr_ai/v4_train.py`: `train`, `identity`, `stage` and `hfcheck`.
+- `src/geoguessr_ai/v4_select.py`: the section 5 rules.
+- `scripts/kaggle_v4.sh`: the pair runner.
+- Notebooks: `runs/kaggle_v4_inputs.ipynb` (CPU) and `runs/kaggle_v4_train.ipynb` (T4×2).
+- Tests: `tests/test_v4_*.py` and the `kaggle_v4.sh` cases in `tests/test_kaggle_scripts.py`.
+
+**No test data is attached.** A training session attaches only:
+- the **inputs bundle**: train rows with bal_rank < 500K, dev, dev_seen, the frozen partition, V3's
+  bal zero-shot heads for 50K and 500K, and the 2K V3 dev_unseen embeddings for the identity check.
+  Every file is sha-checked against its V3 source, and a `MANIFEST.sha256` whose own sha256 is in
+  the config;
+- its own previous output, to resume.
+
+The bundle is built in a CPU session from the Phase 1 output. That is the only session that has
+test.csv mounted, and it never opens it. The training preflight refuses any other input and any
+attached path containing "test".
+
+**Recipe values fixed here** (not in sections 3–5 before):
+- label smoothing 0.1 and logit scale 100 (V1 and the V3 probe);
+- gradient clip 1.0, with the scheduler step skipped on an fp16 overflow (`train.finetune`);
+- weight decay 0 on LoRA A/B and on the head;
+- AdamW (0.9, 0.999, 1e-8);
+- micro-batch 16 × 4 accumulation = effective batch 64;
+- warmup = 5% of the steps; steps = S // 64.
+
+**Data order.** One stream over seeded per-epoch permutations. An image's augmentation depends only
+on (seed, epoch, bal_rank), so both backbones, and both N where they overlap, see the same pixels.
+
+**Evals.**
+- **Per-epoch 2K dev_unseen diagnostic, in the 50K full run (job 4) only.** One eval each time
+  an epoch boundary is crossed: 9 evals, about 0.17 h. The short runs, the 500K run, the seed-2
+  replicate and the control have none (`evals.diagnostic_jobs = [4]`; decided 2026-11-19 to keep
+  the budget inside 60 h). **Diagnostic only: never used for selection, stopping or checkpoint
+  choice.** A test checks that stubbing it out leaves the final weights bit-identical.
+- 5K dev_unseen at S/3 and 2S/3, in the full and control runs only, as budgeted. The short runs
+  have none. Diagnostic only.
+- At the final checkpoint: all of dev_unseen (the selection split) and dev_seen.
+
+**Job numbering k** (the GPU pattern is keyed to it; a skipped slot keeps its number):
+- 0–2: short runs at 1e-4, 3e-4, 1e-3;
+- 3: the edge step, only if `v4_select` asks for it;
+- 4: 50K full; 5: 500K full;
+- 6: seed-2 replicate at 50K, **seed 43** (confirmed 2026-11-19);
+- 7: the augmented-frozen control.
+
+The lr for jobs 3–7 is read from the committed `configs/v4_selection.json`. **The control's head
+lr = 10 × that backbone's selected adapter lr** (confirmed 2026-11-19), i.e. the same head lr as
+its 50K full run.
+
+**Resume.**
+- A checkpoint holds the trainable weights, AdamW, GradScaler, the scheduler, the stream position,
+  the RNG states and a run key. The key covers the config, the job, the code commit, and the
+  sha256 of the bundle, archive manifest, head and partition.
+- Checkpoints are written every 450 steps (≈ 30 min), at each eval point and on STOP, and pushed
+  to the private runs repo. A key mismatch is refused, so a code fix restarts an unfinished run.
+- Measured on CPU (the tiny model, with STOP from outside at step 60 of 200): the resumed run's
+  final weights and its loss/eval log are bit-identical to an uninterrupted run. On GPU,
+  nondeterministic kernels make a resume close, not bit-identical.
+
+**HF write access.** The Kaggle secret `HF_TOKEN` needs **write** access, because checkpoints are
+pushed to `Daggerabuse/geoguessr-v4-runs`. The notebook preflight and `kaggle_v4.sh` both put and
+delete a file there, and assert that the repo is private, before staging or training.
+
+**Budget with the per-epoch diagnostic** (`scripts/v4_budget.py`; the reserve is now the option's
+longest job):
+- With the diagnostic in job 4 only, B-S2 at r = 16.0 is **50.0 + 9.6 reserve = 59.6 h** (was
+  49.8 + 9.4 = 59.2). The reserve grows because job 4 is now the longest job. The break-even is
+  **15.9 img/s** (was 15.8); at 15.8 the total is 60.1 h.
+- A diagnostic in every training run would have cost 60.0 h at r = 16.0 (break-even 16.1, above
+  the measured rate). That is why it is limited to job 4.
+- The declared order of cuts is unchanged: the reserve first, then the seed-2 run.
+- The other options' rows are unchanged (they carry no diagnostic).
+
 ## 6. Open risks
 
-- **The LoRA rates are estimates.** At C, 50K vs 500K does not fit with a full-length search; the
-  rule picks the option from the pilot.
-- **The CPU decode headroom** is about 1× on 4 cores with two runs. It may cap r below the GPU
-  rate.
-- **StreetCLIP is 10–20% slower** than its identical-architecture base in every measurement so far;
-  cause unknown.
-- **`/kaggle/temp` capacity** for 28 GB is undocumented. **HF throttling** of about 100–150 GB of
-  private downloads is unmeasured.
+- **B-S2 has no slack beyond the reserve.** r = 16.0 is only 0.2 img/s above the recomputed
+  break-even.
+  - The rate comes from a 3,000-image run. The 87-minute clock log was steady, but a 9 h run on
+    another machine may differ.
+  - Below about 15.8 img/s the plan exceeds 60 h. The order of cuts is declared: the reserve
+    first, then the descriptive seed-2 run.
+- **Last-12 adapts only the upper half** (section 4b): it is biased toward "keep" if
+  StreetCLIP's lead sits in the lower blocks.
+- **The short-horizon lr search** (100K seen) tends to pick a higher lr than the full schedule
+  would.
+- **GPU speed differs by card** (13–17% here): budgeted at the slower card and counterbalanced.
+  The CPU decode headroom was ample in the pilot.
+- **`/kaggle/temp`** has no separate mount: it is a directory on the root overlay, 965 GB free
+  in the pilot. 28 GB of staging is still untested. **HF throttling** of about 100–150 GB of
+  private downloads is unmeasured; the pilot saw none at 101–286 MB/s.
 - **The frozen comparators** were tuned with their own grids and on dev_seen (V3 limitations). A
   fine-tuned vs frozen difference also includes that.
 - **One subset draw**, inherited from V2/V3 (seed 42).

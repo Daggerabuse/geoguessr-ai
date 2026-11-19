@@ -1,0 +1,69 @@
+{
+  "note": "DRAFT, not yet the V4 pre-dev note: the machine half of it (docs/V4_FEASIBILITY.md, sections 3-5). Fill inputs.*_sha256 after the bundle and the bal archive exist, review, then commit before any V4 training run. v4_train refuses to run unless this file is committed and unmodified; any change after a run starts changes the run key (a fresh run). Confirmed 2026-11-19: the seed-2 replicate (job 6) uses seed 43; the control's (job 7) head lr = 10 x that backbone's selected adapter lr (= its 50K full run's head lr).",
+  "option": "B-S2",
+  "ordering": "bal",
+  "backbones": {
+    "streetclip": "geolocal/StreetCLIP",
+    "clip_l14_336": "openai/clip-vit-large-patch14-336"
+  },
+  "gpu_rule": "job k: streetclip on cuda:(k mod 2), clip_l14_336 on the other GPU (decision 7)",
+  "lora": {"rank": 16, "alpha": 16, "targets": ["q_proj", "k_proj", "v_proj", "out_proj"], "blocks": 12},
+  "train": {
+    "effective_batch": 64,
+    "micro_batch": 16,
+    "warmup_frac": 0.05,
+    "schedule": "linear warmup, then cosine to 0 (train.lr_factor); the scheduler step is skipped when an fp16 overflow skips the optimizer step",
+    "head_lr_mult": 10,
+    "weight_decay": 0.0,
+    "adam_betas": [0.9, 0.999],
+    "adam_eps": 1e-08,
+    "label_smoothing": 0.1,
+    "logit_scale": 100.0,
+    "grad_clip": 1.0,
+    "augmentation": "train.train_view (V1: no flip, no hue), seeded by (seed, epoch, bal_rank)",
+    "workers": 2,
+    "eval_batch": 64
+  },
+  "seen": {"short": 100000, "full": 500000},
+  "ckpt_every_steps": 450,
+  "log_every_steps": 50,
+  "evals": {
+    "intermediate": "5K dev_unseen at steps total//3 and 2*total//3, full and control runs only (diagnostic only; short runs have none, as budgeted)",
+    "intermediate_n": 5000,
+    "diagnostic_n": 2000,
+    "diagnostic": "2K dev_unseen after every epoch boundary, in the 50K full run (job 4) only: diagnostic only, never used for selection, stopping or checkpoint choice",
+    "diagnostic_jobs": [4],
+    "subset_seed": 42,
+    "final": "all of dev_unseen (selection) and dev_seen (diagnostic), at the final checkpoint"
+  },
+  "selection": {
+    "split": "dev_unseen (all 20,000)",
+    "checkpoint": "final",
+    "metric": "mean GeoScore of the top-1 cell centroid",
+    "lr_grid": [0.0001, 0.0003, 0.001],
+    "step": 3,
+    "tie_tol": 5.0,
+    "per_backbone": true,
+    "matched_lr": "sensitivity only"
+  },
+  "identity": {"n": 2000, "head_n": 50000, "top1_same_min": 0.99},
+  "seed": 42,
+  "n_boot": 1000,
+  "inputs": {
+    "geocells_sha256": "9882eb2ae7124f3331859bbf742a52c9d30fca517a31d16a83bfd77d6b74662b",
+    "bundle_manifest_sha256": null,
+    "archive_repo": "Daggerabuse/osv5m-ft-archive-bal",
+    "archive_manifest_sha256": null
+  },
+  "runs_repo": "Daggerabuse/geoguessr-v4-runs",
+  "jobs": [
+    {"k": 0, "name": "short_lr1e-4", "kind": "short", "n": 50000, "lr": 0.0001, "seed": 42},
+    {"k": 1, "name": "short_lr3e-4", "kind": "short", "n": 50000, "lr": 0.0003, "seed": 42},
+    {"k": 2, "name": "short_lr1e-3", "kind": "short", "n": 50000, "lr": 0.001, "seed": 42},
+    {"k": 3, "name": "short_edge", "kind": "short", "n": 50000, "lr": "edge", "seed": 42},
+    {"k": 4, "name": "full_50k", "kind": "full", "n": 50000, "lr": "selected", "seed": 42},
+    {"k": 5, "name": "full_500k", "kind": "full", "n": 500000, "lr": "selected", "seed": 42},
+    {"k": 6, "name": "full_50k_seed2", "kind": "full", "n": 50000, "lr": "selected", "seed": 43},
+    {"k": 7, "name": "control_50k", "kind": "control", "n": 50000, "lr": "selected", "seed": 42}
+  ]
+}
