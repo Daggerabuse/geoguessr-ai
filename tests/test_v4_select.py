@@ -55,15 +55,17 @@ def test_missing_result_refused_and_matched_lr_is_reported(tmp_path):
     with pytest.raises(SystemExit, match="no final result"):
         sel({1e-4: 1, 3e-4: 2}, {1e-4: 1, 3e-4: 2, 1e-3: 3})
     assert vs.matched_lr({"a": {1e-4: 10, 3e-4: 0}, "b": {1e-4: 0, 3e-4: 11}}) == 3e-4
-    cfg = {"backbones": {"streetclip": "", "clip_l14_336": ""},
+    jobs = [{"k": k, "name": f"B_short_{lr}", "kind": "short", "lr": lr} for k, lr in enumerate(GRID)]
+    cfg = {"backbones": {"streetclip": "", "clip_l14_336": ""}, "jobs": jobs,
            "selection": {"lr_grid": GRID, "step": 3, "tie_tol": 5.0}}
     (tmp_path / "c.json").write_text(json.dumps(cfg))
     for bb in cfg["backbones"]:
-        for lr, gs in zip(GRID, (1, 9, 2)):
-            d = tmp_path / "runs" / f"{bb}_{lr}"
-            d.mkdir(parents=True)
-            (d / "result.json").write_text(json.dumps({"kind": "short", "backbone": bb, "lr": lr,
-                                                      "dev": {"geoscore": {"mean": gs}}}))
+        for j, gs in zip(jobs, (1, 9, 2)):
+            for job, score in ((j, gs), ({**j, "name": f"A_short_{j['lr']}"}, 100 * gs * (j["k"] != 1))):
+                d = tmp_path / "runs" / f"{job['name']}_{bb}"  # another recipe's run is ignored
+                d.mkdir(parents=True)
+                (d / "result.json").write_text(json.dumps({"kind": "short", "backbone": bb, "lr": j["lr"],
+                                                          "job": job, "dev": {"geoscore": {"mean": score}}}))
     out = tmp_path / "sel.json"
     vs.main(["--runs", str(tmp_path / "runs"), "--config", str(tmp_path / "c.json"), "--out", str(out)])
     r = json.loads(out.read_text())

@@ -8,6 +8,7 @@
 #   INPUTS      the V4 inputs bundle (default: the one dir under /kaggle/input holding
 #               MANIFEST.sha256)
 #   CONFIG      default configs/v4_predev.json (must be committed; v4_train checks)
+#   SELECTION   default configs/v4_selection.json: that config's v4_select output (jobs 3-6)
 #   DEADLINE_MIN  wall-clock minutes. At the deadline a STOP marker ($OUT/STOP) makes every run
 #               checkpoint (pushed to the runs repo) and exit 3 at its next step: RESUME NEEDED,
 #               this script exits 3. The runs are killed GRACE_MIN (default 30) minutes later.
@@ -29,6 +30,7 @@ fail() { echo "FAILED: $*"; exit 1; }
 [ -n "${JOBS:-}" ] || fail "set JOBS, e.g. JOBS=\"0 1\""
 for k in $JOBS; do [[ $k =~ ^[0-9]+$ ]] || fail "JOBS must be job numbers, got '$k'"; done
 CONFIG=${CONFIG:-configs/v4_predev.json}
+SELECTION=${SELECTION:-configs/v4_selection.json}
 INPUTS=${INPUTS:-}
 [ -n "$INPUTS" ] || INPUTS=$(find_input "$K/input" MANIFEST.sha256) || fail "attach the V4 inputs bundle"
 OUT=$K/working/v4_runs
@@ -141,7 +143,7 @@ done
 for k in $JOBS; do
   echo "=== job $k: streetclip on cuda:$((k % 2)), clip_l14_336 on cuda:$((1 - k % 2))"
   [ ! -e "$STOP" ] || { echo "RESUME NEEDED: deadline before job $k"; exit 3; }
-  pair train --job "$k" --device auto
+  pair train --job "$k" --device auto --selection "$SELECTION"
   verdict "job $k" "${CODES[@]}"
 done
 ls -la "$OUT"

@@ -263,6 +263,7 @@ def test_v4_hf_check_identity_then_pairs_on_the_declared_gpus(tmp_path):
     assert ident == {"streetclip": "cuda:1", "clip_l14_336": "cuda:0"}  # the first job's GPUs (k = 1)
     train = _v4_calls(tmp_path, "train")
     assert len(train) == 4 and all("--device auto" in c and "--stop-file" in c for c in train)
+    assert all("--selection configs/v4_selection.json" in c for c in train)  # the SELECTION default
     assert [c.split("--job ")[1].split()[0] for c in train] == ["1", "1", "2", "2"]
     assert out.count("TRAIN RAN") == 4 and "(exit 0" in out
 

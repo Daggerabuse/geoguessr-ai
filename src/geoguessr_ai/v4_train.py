@@ -8,6 +8,8 @@ backbones) run side by side, StreetCLIP on cuda:(k mod 2) and L/14-336 on the ot
             from V3's bal cell_zeroshot head of the same N; AdamW (head lr = head_lr_mult x lr),
             warmup + cosine to 0, AMP, gradient accumulation to the effective batch. kind=control:
             no LoRA, frozen encoder under no_grad, head only, same augmented schedule.
+            train.freeze_head (recipe B, configs/v4_predev_v2.json): the head stays the V3 head
+            (no head parameters train, LoRA only); a control run is refused (nothing would train).
             Data order: a flat stream over seeded per-epoch permutations; the augmentation of an
             image depends only on (seed, epoch, bal_rank), so both backbones and both N see the
             same pixels. A resume restarts the stream at its position without decoding.
@@ -190,7 +192,8 @@ def archive_index(parts: Path, want_sha: str | None) -> dict[str, str]:
 
 def build_model(cfg: dict, model_name: str, head: np.ndarray, kind: str, seed: int, smoke: bool,
                 device):
-    """(model, trainable named params, image size). kind control: no LoRA, encoder frozen."""
+    """(model, trainable named params, image size). kind control: no LoRA, encoder frozen.
+    train.freeze_head: the head is not trained."""
     import torch
     import torch.nn.functional as F
     from torch import nn
@@ -201,6 +204,9 @@ def build_model(cfg: dict, model_name: str, head: np.ndarray, kind: str, seed: i
 
     if smoke:
         torch.manual_seed(0)  # the tiny random encoder must be the same in every process
+    frozen_head = cfg["train"].get("freeze_head", False)
+    if frozen_head and kind == "control":
+        raise SystemExit("a control run with a frozen head trains nothing")
     vision, size, dim = load_encoder(model_name, smoke, device)
     torch.manual_seed(seed)  # LoRA A init
     lo = cfg["lora"]
@@ -215,7 +221,8 @@ def build_model(cfg: dict, model_name: str, head: np.ndarray, kind: str, seed: i
         def __init__(self):
             super().__init__()
             self.vision, self.control = vision, kind == "control"
-            self.head = nn.Parameter(torch.from_numpy(np.asarray(head, dtype=np.float32)).to(device))
+            self.head = nn.Parameter(torch.from_numpy(np.asarray(head, dtype=np.float32)).to(device),
+                                     requires_grad=not frozen_head)
 
         def embed(self, px):
             with torch.set_grad_enabled(torch.is_grad_enabled() and not self.control):
@@ -440,6 +447,9 @@ def run_train(args) -> int:
     rdir = out / run_id
     rdir.mkdir(parents=True, exist_ok=True)
     if (rdir / "DONE").exists():
+        done_key = json.loads((rdir / "result.json").read_text())["key"]
+        if done_key != key:
+            raise SystemExit(f"{run_id}: DONE with run key {done_key} != this run's {key}: use a fresh output")
         print(f"{run_id}: DONE already", flush=True)
         return 0
     runs = Runs(None if args.smoke else cfg["runs_repo"], run_id, rdir / "hub.log")
@@ -453,8 +463,9 @@ def run_train(args) -> int:
     seed, amp = job["seed"], device.type == "cuda"
     model, trainable, size = build_model(cfg, cfg["backbones"][args.backbone], np.load(head_file),
                                          job["kind"], seed, args.smoke, device)
-    groups = [{"params": [p for n, p in trainable.items() if n != "head"], "lr": lr},
-              {"params": [trainable["head"]], "lr": lr * t["head_lr_mult"]}]
+    groups = [{"params": [p for n, p in trainable.items() if n != "head"], "lr": lr}]
+    if "head" in trainable:
+        groups.append({"params": [trainable["head"]], "lr": lr * t["head_lr_mult"]})
     groups = [g for g in groups if g["params"]]
     opt = torch.optim.AdamW(groups, weight_decay=t["weight_decay"], betas=tuple(t["adam_betas"]),
                             eps=t["adam_eps"])
@@ -476,7 +487,9 @@ def run_train(args) -> int:
         print(f"{run_id}: resumed at step {step} of {sch['total']}", flush=True)
     log = Log(rdir / "log.jsonl", step if state else None)
     meta = {"run_id": run_id, "key": key, "k": job["k"], "job": job, "backbone": args.backbone,
-            "model": cfg["backbones"][args.backbone], "lr": lr, "head_lr": lr * t["head_lr_mult"],
+            "model": cfg["backbones"][args.backbone], "lr": lr,
+            "head_lr": None if "head" not in trainable else lr * t["head_lr_mult"],
+            "head_frozen": "head" not in trainable,
             "seed": seed, "n": job["n"], "kind": job["kind"], "steps": sch["total"],
             "images_seen": sch["total"] * sch["eff"], "code_commit": commit, "gpu": gpu, **hashes}
     if not state:

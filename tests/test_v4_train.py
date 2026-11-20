@@ -29,7 +29,7 @@ def _rows(prefix: str, n: int, rng) -> pd.DataFrame:
         "creator_id": [f"{prefix}c{i % 4}" for i in range(n)], "label": [0] * n})
 
 
-def make_world(root: Path, n_train: int = N_TRAIN) -> dict:
+def make_world(root: Path, n_train: int = N_TRAIN, config: str = "v4_predev.json") -> dict:
     """parts/ (2 archive parts + manifest.csv), bundle/ (a v4_inputs-style bundle whose identity
     embeddings come from the tiny frozen encoder itself), config.json; returns the CLI args."""
     from io import BytesIO
@@ -79,7 +79,7 @@ def make_world(root: Path, n_train: int = N_TRAIN) -> dict:
         (bundle / "identity").mkdir(exist_ok=True)
         np.savez(bundle / "identity" / f"{bb}_dev2k.npz", ids=np.array(dev_ids), emb=e.numpy())
 
-    cfg = json.loads((REPO / "configs" / "v4_predev.json").read_text())
+    cfg = json.loads((REPO / "configs" / config).read_text())
     cfg["train"].update(effective_batch=4, micro_batch=2, workers=0, eval_batch=4)
     cfg["seen"] = {"short": 40, "full": 64}
     cfg.update(ckpt_every_steps=3, log_every_steps=1, n_boot=20)
@@ -255,6 +255,45 @@ def test_a_changed_setting_refuses_the_old_checkpoint(world, tmp_path):
     changed.write_text(json.dumps(cfg))
     with pytest.raises(SystemExit, match="run key"):
         vt.main(_args(dict(w, config=changed), "train", *job))
+    assert _call(_args(w, "train", *job)) == 0  # finished under the original key
+    with pytest.raises(SystemExit, match="DONE with run key"):  # DONE never skips a run of another key
+        vt.main(_args(dict(w, config=changed), "train", *job))
+
+
+def test_frozen_head_trains_lora_only_and_resumes(tmp_path):
+    """Recipe B (train.freeze_head): only LoRA A/B get gradients and are saved, the final evals use
+    the V3 head unchanged, a control run is refused, and STOP + resume equals an uninterrupted run."""
+    from geoguessr_ai.phase3_final import apply_head
+
+    w = make_world(tmp_path / "w", config="v4_predev_v2.json")
+    cfg = json.loads(w["config"].read_text())
+    head = np.load(w["inputs"] / "heads" / "streetclip" / f"bal_{N_TRAIN}_cell_zeroshot.npy")
+    model, tr, _ = vt.build_model(cfg, "smoke", head, "short", 42, True, torch.device("cpu"))
+    assert tr and all(n.endswith(("lora_a", "lora_b")) for n in tr) and not model.head.requires_grad
+    model(torch.randn(2, 3, 32, 32)).logsumexp(1).sum().backward()
+    assert model.head.grad is None and all(p.grad is not None for p in tr.values())
+    assert any(p.grad.abs().sum() > 0 for n, p in tr.items() if n.endswith("lora_b"))
+    with pytest.raises(SystemExit, match="trains nothing"):
+        vt.build_model(cfg, "smoke", head, "control", 42, True, torch.device("cpu"))
+
+    one, two = dict(w, out=tmp_path / "one"), dict(w, out=tmp_path / "two")
+    for o in (one, two):
+        assert _call(_args(o, "identity", "--backbone", "streetclip")) == 0
+    job = ["--job", "0", "--backbone", "streetclip"]
+    assert _call(_args(one, "train", *job)) == 0
+    assert _call(_args(two, "train", *job, "--stop-after-steps", "5")) == 3
+    assert _call(_args(two, "train", *job)) == 0
+    rdir1, rdir2 = (o["out"] / "k0_B_short_lr1e-4_streetclip" for o in (one, two))
+    w1, w2 = _weights(rdir1), _weights(rdir2)
+    assert "head" not in w1 and set(w1) == set(tr) and all(torch.equal(w1[k], w2[k]) for k in w1)
+    assert any(w1[n].abs().sum() > 0 for n in w1 if n.endswith("lora_b"))  # the adapters did train
+    assert _losses(rdir1) == _losses(rdir2)
+    res = json.loads((rdir2 / "result.json").read_text())
+    assert res["head_frozen"] is True and res["head_lr"] is None and res["head"] == file_sha256(
+        w["inputs"] / "heads" / "streetclip" / f"bal_{N_TRAIN}_cell_zeroshot.npy")
+    e = np.load(rdir2 / "final" / "dev_emb.npz")["emb"].astype(np.float32)
+    pred = pd.read_csv(rdir2 / "final" / "dev_predictions.csv")
+    assert np.array_equal(apply_head(e, head, cfg["train"]["logit_scale"])[:, 0], pred["c0"])  # = V3 head
 
 
 def test_control_and_the_large_n_run(world, tmp_path):

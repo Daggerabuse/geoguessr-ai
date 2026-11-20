@@ -6,6 +6,12 @@ committed. Every rate below is either **measured** (with the file it comes from)
 (with how it was derived). Estimates are what the pilot (section 4) replaces. Section 7 lists the
 independent review of a first draft and what changed because of it.
 
+**Update 2026-11-20 (after the first V4 dev results; section 5c).** Recipe A (the head trained with
+the adapters at 10× their lr) finished below the frozen V3 heads on both dev splits. It is recorded
+as a negative dev result and stops after job 2 (its edge step is dropped). **Recipe B** (the head
+frozen at the V3 head, LoRA only) **was chosen after seeing those results** and replaces it
+(`configs/v4_predev_v2.json`). The test split is still unopened.
+
 **Question.** Frozen encoders (V3) gave StreetCLIP a GeoScore lead over its base CLIP
 L/14-336. That lead depends on the predictor and the init, and a text-initialised head narrows it
 (H4/H5). Does fine-tuning the vision encoder (LoRA) **close, keep or reverse** the lead, and how
@@ -37,7 +43,8 @@ does that depend on N (asked: 50K vs 500K)? The metric stays GeoScore, with the 
 2. **Ordering: bal.** bal needs a new archive. It is built in a CPU session
    (`runs/kaggle_v4_bal_archive.ipynb`, section 1).
 3. **Equivalence margin for "keep": 40 GeoScore**, fixed with its reasoning in section 5.
-4. **Head lr = 10× the adapter lr**, fixed.
+4. **Head lr = 10× the adapter lr**, fixed. (Recipe A only. Recipe B freezes the head; section
+   5c, decided 2026-11-20 after seeing recipe A's dev results.)
 5. **Quota:** a T4×2 session costs 1 quota h per wall-clock hour. **Confirmed** by the pilot
    (section 2).
 6. **LoRA config: r = 16 on q,k,v,out_proj of the last 12 of 24 blocks**, for both backbones.
@@ -790,6 +797,152 @@ longest job):
 - The declared order of cuts is unchanged: the reserve first, then the seed-2 run.
 - The other options' rows are unchanged (they carry no diagnostic).
 
+## 5c. Recipe A: a negative dev result; recipe B (2026-11-20, AFTER seeing V4 dev results)
+
+Everything in this section was decided **after** recipe A's first dev results were seen. It is
+not part of the pre-dev note of sections 3–5b, and is reported as a post-hoc change.
+
+**Recipe A** (`configs/v4_predev.json`, commit 26d98a4): LoRA r16 on the last 12 blocks plus the
+cosine head, initialised from V3's bal `cell_zeroshot` head of the same N and **trained at 10× the
+adapter lr**. Short runs at 50K (100K images seen): session 1 (jobs 0, 1; 274 min, exit 0) and
+session 2 (job 2; 130 min, exit 0; same commit 26d98a4, seeded from session 1's output):
+
+| dev GeoScore (top-1 cell centroid) | StreetCLIP dev_unseen | L/14-336 dev_unseen | StreetCLIP dev_seen | L/14-336 dev_seen |
+|---|---|---|---|---|
+| V3 frozen `cell_zeroshot`, bal 50K (`results/v3/phase3_dev_predictors.csv`) | 3372 [3237, 3587] | 3215 [2861, 3460] | 3586 | 3447 |
+| A, job 0: lr 1e-4 (head 1e-3) | 3163 [2924, 3383] | 3002 [2607, 3277] | 3427 | 3202 |
+| A, job 1: lr 3e-4 (head 3e-3) | 3059 [2801, 3313] | 2952 [2620, 3241] | 3368 | 3225 |
+| A, job 2: lr 1e-3 (head 1e-2) | 3065 [2847, 3306] | 2988 [2701, 3226] | 3385 | 3255 |
+
+- Brackets are 95% creator-cluster bootstrap CIs (dev_unseen). Selection would be on dev_unseen;
+  dev_seen is diagnostic.
+- All three short runs finished below the frozen starting point on **both** splits, so this is not
+  only an effect of unseen creators. The lowest lr (1e-4) was best for both backbones; 3e-4 and
+  1e-3 are within 36 of each other.
+- What A's declared rule says on the full grid (`v4_select` with `configs/v4_predev.json`, run
+  locally, not committed): both backbones pick 1e-4, the low edge, so it asks for the edge step,
+  job 3 at lr 3.33e-5. That step is not run (below).
+- **No bug found** (checked before any further GPU run):
+  - **Labels:** the trainer's labels are `geocells.assign` on the same lat/lon as V3's probe,
+    over the same `bal_rank < 50000` rows.
+    - 3781 cells are used. The median distance from an image to its label's cell centroid is
+      13 km (99th percentile 537 km); with lat/lon swapped it would be 5847 km.
+    - 94.6% of images share their cell's majority country.
+  - **Image/label alignment:** the initial train loss is 3.12 (L/14) / 3.23 (StreetCLIP),
+    against ≈ 8.5 for labels unrelated to the images.
+  - **fp16:** exactly one overflow skip per run in jobs 0–2, at the GradScaler's first step
+    (the logged lr is the schedule's value one step behind).
+  - **Eval preprocessing** equals V3's: the zero-init identity check agrees on top-1 for 99.75% /
+    99.4% of images, mean cos 0.999998.
+- **The head was already fitted to these images.** V3's head reaches a loss of 3.1 on its own
+  augmented training images, against 6.5–6.6 on clean dev_unseen images (2K subset). V3 trained
+  it for 23 epochs on exactly these 50K images. Recipe A then trains it further on the same
+  images, at 10× the adapter lr and batch 64.
+- **Post-hoc decomposition** (2K dev_unseen subset, CPU, chosen after seeing the numbers above;
+  diagnostic only, not additive, wide CIs):
+
+| GeoScore, 2K subset | V3 emb × V3 head | V3 emb × A head | A emb × V3 head | A emb × A head |
+|---|---|---|---|---|
+| StreetCLIP, job 0 | 3339 | 3133 | 3287 | 3135 |
+| StreetCLIP, job 1 | 3339 | 2736 | 3364 | 3034 |
+| L/14-336, job 0 | 3205 | 3046 | 3114 | 3014 |
+| L/14-336, job 1 | 3205 | 2724 | 3199 | 2950 |
+
+  - The adapted encoder moved a lot: mean cos(A emb, V3 emb) is 0.69–0.78.
+  - Even so, paired with the **V3 head** it scored about as well as V3 (within ±100 on the
+    subset).
+  - The co-trained head was the worse head on its own encoder's embeddings in all 4 runs, though
+    its rows barely changed direction (mean cos ≥ 0.99 to V3's).
+  - Reading: in recipe A the head over-fits the training images. This reading comes from a
+    post-hoc diagnostic, not from a declared test.
+- **Recipe A is closed** (2026-11-20). Job 2 finished with the old config, so A's three-point grid
+  is complete. **Its edge step (job 3) is dropped: a decision made after seeing dev.** The edge
+  rule asked for it; it is not run. Jobs 3–7 of recipe A never run. Recipe A is reported as a
+  negative dev result; none of its models goes to test. The decomposition above covers jobs 0
+  and 1 only; it was not extended to job 2.
+
+**Recipe B** (`configs/v4_predev_v2.json`, new run key):
+- **Chosen after seeing recipe A's dev results**, because the A encoder × V3 head result above
+  suggests the head update, not the encoder update, is what lost GeoScore.
+- **Identical to recipe A except `train.freeze_head = true`:** the head is the V3 bal
+  `cell_zeroshot` head of the same N and gets no gradient. Only LoRA trains (r16, q,k,v,out_proj,
+  last 12 blocks).
+  - Its sha256 is in the run key and in `result.json`; `weights_final.pt` holds the adapters only.
+  - `head_lr_mult` is removed from the config.
+- **Unchanged from A:** inputs, schedule, augmentation and its RNG, the lr grid {1e-4, 3e-4,
+  1e-3}, the edge and stopping rules, the 5 GeoScore tie tolerance, the "keep" margin of 40,
+  selection on all of dev_unseen at the final checkpoint, the GPU parity rule (decision 7), seeds
+  42/43, and the job numbering 0–6.
+- **Job names carry a `B_` prefix**, so run ids and paths in the runs repo never collide with
+  recipe A's.
+  - `v4_select` reads only results whose job is declared in the config it is given.
+  - The trainer refuses a finished run directory whose run key differs from the current one.
+  - A recipe B session never seeds from a recipe A output.
+  - The selection file is `configs/v4_selection_v2.json`:
+    `uv run python -m geoguessr_ai.v4_select --runs <B output> --config configs/v4_predev_v2.json --out configs/v4_selection_v2.json`.
+- **What B can still answer:** the gap question, with the head held at each backbone's own V3
+  head. "Fine-tuned vs frozen" becomes "adapted encoder vs V3 encoder, same head".
+- **What B cannot answer:**
+  - It is not LP-FT.
+  - Its lr choice inherits recipe A's evidence. The grid is the same, but the recipe was picked
+    knowing that A lost GeoScore.
+
+**The control (A's job 7) under B: dropped, not replaced.**
+- A's control trained the head on the frozen encoder with the same augmented schedule. Its
+  purpose was to separate encoder adaptation from "augmentation plus more head training".
+- Under B, no head training remains to separate out. The B = 0 model is exactly the V3 frozen
+  model (identity check), so B's fine-tuned vs frozen contrast already isolates the adapter
+  update.
+- A head-only control would have nothing to train, so the trainer refuses it.
+- This saves about 5.5 quota h.
+- **Limitation:** B's contrast is "the adapter update **under this augmented schedule**" vs the
+  V3 encoder, not encoder adaptation as such. The augmentation (crops of 0.7–1.0 of the short
+  side, so objects about 1.15× larger than in the eval center crop, plus jitter, blur and
+  erasing) acts only through the adapters, and nothing in B separates its effect. A B result in
+  either direction may be partly the augmentation's. Separating it would need a non-augmented
+  LoRA run (at least one short pair, 2.4 h); it is not declared and is not in the budget.
+
+**Budget, recipe B** (per-job hours from `uv run python scripts/v4_budget.py --rate 15.4`; its
+option totals still add the spent 1.5 h pilot, which the table below leaves out):
+- **Rate:** 15.4 img/s, the slower GPU's sustained train rate in session 1 (`log.jsonl`
+  `img_per_s`; the pilot measured 16.0).
+  - Freezing the head saves nothing measurable here: the head's gradient is negligible next to
+    the LoRA backward pass.
+  - Session 1 took 274 min for two short pairs and session 2 took 130 min for one, against
+    2.43 h per short pair budgeted, so the estimate is slightly conservative.
+- Per pair, setup included: short 2.43 h, full 9.74 h, job 4 with its diagnostic 9.91 h, 50K
+  hybrid 0.72 h, test pass (2 models) 2.24 h.
+- **This week's sessions are not counted**: the pilot, session 1 and session 2 (recipe A) are
+  spent. The 60 h are the next two Kaggle weeks, both starting at 30 h.
+
+| item | quota h |
+|---|---|
+| B short runs, jobs 0–2 | 7.3 |
+| B edge job 3 (only if `v4_select` asks for it) | 2.4 |
+| B jobs 4, 5, 6 (50K full + diagnostic, 500K full, 50K seed 2) | 29.4 |
+| 50K hybrid re-embedding | 0.7 |
+| test pass, 4 models | 4.5 |
+| **total** | **44.3** (41.9 without the edge) |
+| + one lost session of the longest job (reserve) | **54.2** (51.8) |
+
+- **It fits 60 h in total**, with 5.8 h spare beyond the reserve (8.2 h without the edge).
+  Break-even for the total: about 13.6 img/s.
+- **The weekly 30 h cap binds before the total does** (strict chain; a full pair fills a
+  session):
+  - week 1 holds B jobs 0–2 (+ job 3), job 4 and job 5: 29.4 h with the edge step, 27.0 h
+    without;
+  - week 2 holds job 6, the hybrid and the test pass, 14.9 h, plus the full 9.9 h reserve:
+    24.8 h.
+  - With the edge step, week 1 has only 0.6 h slack; it holds at ≥ 15.0 img/s. Below that, or
+    after any lost session in week 1, job 5 moves to week 2, which then holds 24.7 h of jobs and
+    only 5.3 h of reserve.
+- **Order of cuts (as declared in section 3): the reserve first, then the descriptive seed-2 run
+  (job 6, 9.7 h).**
+  - If job 5 has moved to week 2, one lost full session there means job 6 is cut.
+  - Nothing else is cut without a new decision. The next candidate is moving the test pass into a
+    third week, not shrinking N.
+- The 500K arm and the test pass are never cut silently.
+
 ## 6. Open risks
 
 - **B-S2 has no slack beyond the reserve.** r = 16.0 is only 0.2 img/s above the recomputed
@@ -798,6 +951,9 @@ longest job):
     another machine may differ.
   - Below about 15.8 img/s the plan exceeds 60 h. The order of cuts is declared: the reserve
     first, then the descriptive seed-2 run.
+- **Recipe B was chosen after seeing recipe A's dev results** (section 5c). The lr grid and rules
+  are unchanged, but the recipe itself is a post-hoc choice. It is reported as such, and the
+  V4 test pre-registration has to say so.
 - **Last-12 adapts only the upper half** (section 4b): it is biased toward "keep" if
   StreetCLIP's lead sits in the lower blocks.
 - **The short-horizon lr search** (100K seen) tends to pick a higher lr than the full schedule

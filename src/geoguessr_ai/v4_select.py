@@ -89,11 +89,11 @@ def matched_lr(scores: dict[str, dict[float, float]]) -> float:
 
 
 def read_scores(runs: Path, cfg: dict) -> dict[str, dict[float, float]]:
-    """Final dev_unseen GeoScore of every finished short run under `runs`."""
+    """Final dev_unseen GeoScore of every finished short run under `runs` declared by `cfg`."""
     scores: dict[str, dict[float, float]] = {}
     for f in sorted(Path(runs).glob("*/result.json")):
         r = json.loads(f.read_text())
-        if r["kind"] != "short":
+        if r["kind"] != "short" or r["job"] not in cfg["jobs"]:  # another recipe's run: not this grid
             continue
         scores.setdefault(r["backbone"], {})[r["lr"]] = r["dev"]["geoscore"]["mean"]
     if set(scores) != set(cfg["backbones"]):

@@ -1,0 +1,69 @@
+{
+  "note": "V4 recipe B, the pre-dev note's machine half for the second recipe (docs/V4_FEASIBILITY.md, section 5c). CHOSEN AFTER SEEING RECIPE A's DEV RESULTS (2026-11-20): recipe A (configs/v4_predev.json: head co-trained at 10x the adapter lr) finished below the frozen V3 heads on both dev splits, and on the 2K dev_unseen subset its fine-tuned encoder with the ORIGINAL V3 head scored about as well as V3 while its co-trained head scored lower in all 4 runs (a post-hoc diagnostic). Recipe B is identical to A except train.freeze_head = true: the head stays the V3 bal cell_zeroshot head of the same N, only LoRA (last 12 blocks, r16) trains. Same inputs, lr grid, edge/stop rules, tie tolerance, margin, selection split, GPU parity rule. Job names carry the B_ prefix (distinct run ids and runs-repo paths from recipe A). The augmented-frozen control (recipe A job 7) is not declared: with the head frozen it has nothing to train (section 5c). Its selection file is configs/v4_selection_v2.json.",
+  "option": "B-S2",
+  "recipe": "B",
+  "ordering": "bal",
+  "backbones": {
+    "streetclip": "geolocal/StreetCLIP",
+    "clip_l14_336": "openai/clip-vit-large-patch14-336"
+  },
+  "gpu_rule": "job k: streetclip on cuda:(k mod 2), clip_l14_336 on the other GPU (decision 7)",
+  "lora": {"rank": 16, "alpha": 16, "targets": ["q_proj", "k_proj", "v_proj", "out_proj"], "blocks": 12},
+  "train": {
+    "effective_batch": 64,
+    "micro_batch": 16,
+    "warmup_frac": 0.05,
+    "schedule": "linear warmup, then cosine to 0 (train.lr_factor); the scheduler step is skipped when an fp16 overflow skips the optimizer step",
+    "freeze_head": true,
+    "weight_decay": 0.0,
+    "adam_betas": [0.9, 0.999],
+    "adam_eps": 1e-08,
+    "label_smoothing": 0.1,
+    "logit_scale": 100.0,
+    "grad_clip": 1.0,
+    "augmentation": "train.train_view (V1: no flip, no hue), seeded by (seed, epoch, bal_rank)",
+    "workers": 2,
+    "eval_batch": 64
+  },
+  "seen": {"short": 100000, "full": 500000},
+  "ckpt_every_steps": 450,
+  "log_every_steps": 50,
+  "evals": {
+    "intermediate": "5K dev_unseen at steps total//3 and 2*total//3, full runs only (diagnostic only; short runs have none, as budgeted)",
+    "intermediate_n": 5000,
+    "diagnostic_n": 2000,
+    "diagnostic": "2K dev_unseen after every epoch boundary, in the 50K full run (job 4) only: diagnostic only, never used for selection, stopping or checkpoint choice",
+    "diagnostic_jobs": [4],
+    "subset_seed": 42,
+    "final": "all of dev_unseen (selection) and dev_seen (diagnostic), at the final checkpoint"
+  },
+  "selection": {
+    "split": "dev_unseen (all 20,000)",
+    "checkpoint": "final",
+    "metric": "mean GeoScore of the top-1 cell centroid",
+    "lr_grid": [0.0001, 0.0003, 0.001],
+    "step": 3,
+    "tie_tol": 5.0,
+    "per_backbone": true,
+    "matched_lr": "sensitivity only"
+  },
+  "identity": {"n": 2000, "head_n": 50000, "top1_same_min": 0.99},
+  "seed": 42,
+  "n_boot": 1000,
+  "inputs": {
+    "geocells_sha256": "9882eb2ae7124f3331859bbf742a52c9d30fca517a31d16a83bfd77d6b74662b",
+    "bundle_manifest_sha256": "1fc4e0e5c1fc71f24948380ddc27f03b96c4b35f815e2e6a79d3f9b1900a27ca",
+    "archive_repo": "Daggerabuse/osv5m-ft-archive-bal",
+    "archive_manifest_sha256": "0fe28db46b9dc2d14de689c6a55f25387bb66e5505cfaef90fec9e08e10d3752"
+  },
+  "runs_repo": "Daggerabuse/geoguessr-v4-runs",
+  "jobs": [
+    {"k": 0, "name": "B_short_lr1e-4", "kind": "short", "n": 50000, "lr": 0.0001, "seed": 42},
+    {"k": 1, "name": "B_short_lr3e-4", "kind": "short", "n": 50000, "lr": 0.0003, "seed": 42},
+    {"k": 2, "name": "B_short_lr1e-3", "kind": "short", "n": 50000, "lr": 0.001, "seed": 42},
+    {"k": 3, "name": "B_short_edge", "kind": "short", "n": 50000, "lr": "edge", "seed": 42},
+    {"k": 4, "name": "B_full_50k", "kind": "full", "n": 50000, "lr": "selected", "seed": 42},
+    {"k": 5, "name": "B_full_500k", "kind": "full", "n": 500000, "lr": "selected", "seed": 42},
+    {"k": 6, "name": "B_full_50k_seed2", "kind": "full", "n": 50000, "lr": "selected", "seed": 43}
+  ]
+}

@@ -66,6 +66,10 @@ def options(r):
             [short(r)] * (3 + 1)
             + [full(r) + diag(50_000, S), full(r), full(r)]   # the diagnostic in the 50K full run (job 4) only
             + [ctrl, hyb50, test2, test2],
+        "B-S2-headfrozen  recipe B: B-S2 without the control (section 5c)":
+            [short(r)] * (3 + 1)
+            + [full(r) + diag(50_000, S), full(r), full(r)]
+            + [hyb50, test2, test2],
         "C    B-S1 + seed2 at 50K + 500K hybrid":
             [full(r)] * (3 + 1 + 1 + 1) + [ctrl, hyb50, fwd(500_000), test2, test2],
     }
@@ -103,5 +107,5 @@ if __name__ == "__main__":
     print(f"images seen per full run: {S:,}")
     for r in a.rate:
         report(r)
-    for name in ("A ", "B-full", "B-S1", "B-S2"):
+    for name in ("A ", "B-full", "B-S1", "B-S2 ", "B-S2-headfrozen"):
         print(f"break-even rate for {name.strip()} within {BUDGET:.0f} h incl. reserve: {break_even(name)} img/s")
