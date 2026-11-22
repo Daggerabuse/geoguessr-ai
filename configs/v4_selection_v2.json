@@ -1,34 +1,42 @@
 {
   "grid": [
+    3.33333e-05,
     0.0001,
     0.0003,
     0.001
   ],
   "tie_tol": 5.0,
-  "extended": false,
-  "flags": {},
-  "margins": {},
+  "extended": true,
+  "flags": {
+    "streetclip": "grid_edge",
+    "clip_l14_336": "grid_edge"
+  },
+  "margins": {
+    "streetclip": 25.115523598872187,
+    "clip_l14_336": 5.689280081216566
+  },
   "edge": {
-    "run": true,
-    "side": "low",
+    "run": false,
+    "done": true,
     "lr": 3.33333e-05
   },
-  "selected": null,
-  "first_pass": {
-    "clip_l14_336": 0.0001,
-    "streetclip": 0.0001
+  "selected": {
+    "clip_l14_336": 3.33333e-05,
+    "streetclip": 3.33333e-05
   },
   "scores": {
     "clip_l14_336": {
+      "3.33333e-05": 3042.161570295093,
       "0.0001": 3036.4722902138765,
       "0.0003": 3021.983682248145,
       "0.001": 2958.580847572528
     },
     "streetclip": {
+      "3.33333e-05": 3249.967602104393,
       "0.0001": 3224.8520785055207,
       "0.0003": 3168.487521220093,
       "0.001": 3093.567080392427
     }
   },
-  "matched_lr_sensitivity": 0.0001
+  "matched_lr_sensitivity": 3.33333e-05
 }

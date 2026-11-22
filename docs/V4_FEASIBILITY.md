@@ -887,6 +887,29 @@ session 2 (job 2; 130 min, exit 0; same commit 26d98a4, seeded from session 1's 
   - Its lr choice inherits recipe A's evidence. The grid is the same, but the recipe was picked
     knowing that A lost GeoScore.
 
+**Recipe B short runs** (50K, 100K images seen, head frozen in all 8 runs: `head_frozen` true,
+head sha256 the same per backbone in every job, `weights_final.pt` holds LoRA tensors only).
+Session 1: jobs 0–2, commit c0aa755 (351 min, exit 0). Session 2: job 3, the edge step that
+`v4_select` asked for, commit 723c04b (130 min, exit 0; seeded from session 1's output):
+
+| dev GeoScore (top-1 cell centroid) | StreetCLIP dev_unseen | L/14-336 dev_unseen | StreetCLIP dev_seen | L/14-336 dev_seen |
+|---|---|---|---|---|
+| V3 frozen `cell_zeroshot`, bal 50K (`results/v3/phase3_dev_predictors.csv`) | 3372 [3237, 3587] | 3215 [2861, 3460] | 3586 | 3447 |
+| B, job 3: lr 3.33e-5 (edge) | 3250 [3085, 3472] | 3042 [2624, 3322] | 3509 | 3224 |
+| B, job 0: lr 1e-4 | 3225 [3054, 3445] | 3036 [2631, 3310] | 3506 | 3254 |
+| B, job 1: lr 3e-4 | 3168 [2967, 3410] | 3022 [2635, 3301] | 3479 | 3277 |
+| B, job 2: lr 1e-3 | 3094 [2865, 3357] | 2959 [2589, 3247] | 3461 | 3277 |
+
+- **Selection** (`configs/v4_selection_v2.json`, extended grid): both backbones pick 3.33e-5, the
+  new low edge. Per the stopping rule the grid is frozen and both are flagged `grid_edge`:
+  - StreetCLIP margin to 1e-4: +25.1;
+  - L/14-336 margin to 1e-4: +5.7, only 0.7 above the 5 GeoScore tie tolerance. Had it been
+    within 5, 1e-4 would not have been kept either: the lower lr wins a tie.
+  - The matched lr (sensitivity only) is also 3.33e-5.
+- Every B short run is below the frozen V3 starting point on dev_unseen and dev_seen. dev_unseen
+  rises as the lr falls on both backbones.
+- B-S2: this short-run choice is final for the full runs (jobs 4–6).
+
 **The control (A's job 7) under B: dropped, not replaced.**
 - A's control trained the head on the frozen encoder with the same augmented schedule. Its
   purpose was to separate encoder adaptation from "augmentation plus more head training".
