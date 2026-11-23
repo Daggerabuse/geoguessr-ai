@@ -1,0 +1,517 @@
+{
+  "note": "V4 recipe B test pre-registration, frozen before any V4 test image is read and before job 6 finishes. See docs/V4_FEASIBILITY.md, section 5d.",
+  "created_utc": "2026-11-23T15:54:18Z",
+  "recipe": "B",
+  "ordering": "bal",
+  "metric": "geoscore",
+  "pair": [
+    "streetclip",
+    "clip_l14_336"
+  ],
+  "primary_predictor": "cell_zeroshot",
+  "config": "configs/v4_predev_v2.json",
+  "config_sha256": "d18811c1849d66a0a98a865be638ecb4cc503577100f1f7588ce3ba6fff43411",
+  "selection": "configs/v4_selection_v2.json",
+  "selection_sha256": "d86df9bc19cc258e124c4767764f06a8ba82f45b972efd39de18ab304a5a6cc5",
+  "train_commit": "9db076b5f9aeb126b920dafae83dfe1483c054a1",
+  "inputs": {
+    "geocells_sha256": "9882eb2ae7124f3331859bbf742a52c9d30fca517a31d16a83bfd77d6b74662b",
+    "bundle_manifest_sha256": "1fc4e0e5c1fc71f24948380ddc27f03b96c4b35f815e2e6a79d3f9b1900a27ca",
+    "archive_repo": "Daggerabuse/osv5m-ft-archive-bal",
+    "archive_manifest_sha256": "0fe28db46b9dc2d14de689c6a55f25387bb66e5505cfaef90fec9e08e10d3752"
+  },
+  "models": [
+    {
+      "job": 4,
+      "name": "B_full_50k",
+      "backbone": "streetclip",
+      "n": 50000,
+      "run_id": "k4_B_full_50k_streetclip",
+      "run_key": "ff23cd5f5975ad2b",
+      "model": "geolocal/StreetCLIP",
+      "lr": 3.33333e-05,
+      "seed": 42,
+      "weights_sha256": "b73af837a40daa237a8b5f802cb0c9a0c87db23634158df32191bdd3aa4bc38a",
+      "head_sha256": "7e47af704a624056c55baf951bfcd736b7a006a519254f2b84a1ca77018e91a5",
+      "dev_predictions_sha256": "ae97bf2a09afc217dd07d35121155f11afedda277015c70ef6bb021a42b3282f",
+      "dev_unseen_geoscore": 3197.2991342668124,
+      "dev_seen_geoscore": 3500.297227614236
+    },
+    {
+      "job": 4,
+      "name": "B_full_50k",
+      "backbone": "clip_l14_336",
+      "n": 50000,
+      "run_id": "k4_B_full_50k_clip_l14_336",
+      "run_key": "f3b911e0b4618987",
+      "model": "openai/clip-vit-large-patch14-336",
+      "lr": 3.33333e-05,
+      "seed": 42,
+      "weights_sha256": "a60b5bdbe7561d9cbd67b088cb34beb1fb721f7f325fa81a86f965a8a02c5b79",
+      "head_sha256": "1907951b4047377a597f7394ae6031cb440e187591b508d32d895478bab36eab",
+      "dev_predictions_sha256": "71615c38b7f886831b1627a40f0bc4c884d7142bd4d96777db38b253ec084283",
+      "dev_unseen_geoscore": 3045.839346233359,
+      "dev_seen_geoscore": 3291.243034378008
+    },
+    {
+      "job": 5,
+      "name": "B_full_500k",
+      "backbone": "streetclip",
+      "n": 500000,
+      "run_id": "k5_B_full_500k_streetclip",
+      "run_key": "5f5de29770315af9",
+      "model": "geolocal/StreetCLIP",
+      "lr": 3.33333e-05,
+      "seed": 42,
+      "weights_sha256": "5c4761af6cdb47a8d720615681cf97681369a1faaf27769d77b22fefb5b241d2",
+      "head_sha256": "6c8f0eca1ed167bc6490cb87edda6c59cbd880fdc878c11e81399d8e28431563",
+      "dev_predictions_sha256": "d3db97d42897d613790a1a2b0541f285bb3df2e870d615243d23b24a4134a47f",
+      "dev_unseen_geoscore": 3618.176530487412,
+      "dev_seen_geoscore": 4117.328805896188
+    },
+    {
+      "job": 5,
+      "name": "B_full_500k",
+      "backbone": "clip_l14_336",
+      "n": 500000,
+      "run_id": "k5_B_full_500k_clip_l14_336",
+      "run_key": "e13829e178284fdb",
+      "model": "openai/clip-vit-large-patch14-336",
+      "lr": 3.33333e-05,
+      "seed": 42,
+      "weights_sha256": "f9a2687f3b1e31b8e3dfcb3b35a6d157869bfe3b0cb498f249ed674565fda2c6",
+      "head_sha256": "cfe965f49665e0af0a5bd86299dc4b9f50565d4b4be3315083163ea0464b01a2",
+      "dev_predictions_sha256": "5a4748bc08d4c2e396b89a513bc217915dcf62aa41f2ab9cf0c2bbaa6edf277c",
+      "dev_unseen_geoscore": 3590.8421187915915,
+      "dev_seen_geoscore": 4064.4672598761276
+    }
+  ],
+  "seed2_required_before_test": {
+    "k": 6,
+    "name": "B_full_50k_seed2",
+    "seed": 43
+  },
+  "comparators": {
+    "v3_prereg_sha256": "6aef5a15fed9662f8e586be417f48d05e7871561edf096afbb4db26c8228d66c",
+    "v3_results": "results/v3/test_results.csv",
+    "v3_results_git_blob": "c46dd20fb69d07a946a76e380b5e69908017069c",
+    "cells": [
+      {
+        "backbone": "streetclip",
+        "n": 50000,
+        "predictor": "cell_zeroshot"
+      },
+      {
+        "backbone": "streetclip",
+        "n": 500000,
+        "predictor": "cell_zeroshot"
+      },
+      {
+        "backbone": "clip_l14_336",
+        "n": 50000,
+        "predictor": "cell_zeroshot"
+      },
+      {
+        "backbone": "clip_l14_336",
+        "n": 500000,
+        "predictor": "cell_zeroshot"
+      },
+      {
+        "backbone": "streetclip",
+        "n": 50000,
+        "predictor": "hybrid_zeroshot"
+      },
+      {
+        "backbone": "clip_l14_336",
+        "n": 50000,
+        "predictor": "hybrid_zeroshot"
+      }
+    ]
+  },
+  "hybrid": {
+    "n": 50000,
+    "predictor": "medoid",
+    "hybrid_k": 1000,
+    "mask_km": 1.0,
+    "dtype": "fp32",
+    "frozen_from_v3": {
+      "streetclip": {
+        "m": 5,
+        "k": 1
+      },
+      "clip_l14_336": {
+        "m": 5,
+        "k": 1
+      }
+    }
+  },
+  "test": {
+    "images": 210122,
+    "shards": 5
+  },
+  "dev_check": {
+    "split": "dev_unseen",
+    "n": 2000,
+    "subset_seed": 42,
+    "top1_same_min": 0.99,
+    "rule": "before the test split is read, each model's top-1 cell on these images must match its stored dev prediction; otherwise stop"
+  },
+  "hypotheses": {
+    "statistic": "mean over test images of sum_terms w * per-image GeoScore (5000 * exp(-km / 1492.7)), on the images every term scored",
+    "bootstrap": "paired creator-cluster bootstrap: the same resamples for every term and test; sequence clusters are a sensitivity column and decide nothing",
+    "p_values": {
+      "two_sided": "min(1, 2 * min(p_up, p_down)), p_up = (1 + #{stat <= 0}) / (B + 1), p_down = (1 + #{stat >= 0}) / (B + 1)",
+      "tost": "max((1 + #{stat <= -margin}) / (B + 1), (1 + #{stat >= margin}) / (B + 1))",
+      "below_zero": "(1 + #{stat >= 0}) / (B + 1)"
+    },
+    "multiplicity": "Holm within the primary family (3 tests) and, separately, within the secondary family (6 tests). Secondary results never change a primary verdict.",
+    "margin": 40.0,
+    "alpha": 0.05,
+    "n_boot": 10000,
+    "seed": 42,
+    "primary": [
+      {
+        "id": "P1/change/500K",
+        "test": "two_sided",
+        "terms": [
+          {
+            "w": 1.0,
+            "src": "b",
+            "backbone": "streetclip",
+            "n": 500000,
+            "predictor": "cell_zeroshot"
+          },
+          {
+            "w": -1.0,
+            "src": "b",
+            "backbone": "clip_l14_336",
+            "n": 500000,
+            "predictor": "cell_zeroshot"
+          },
+          {
+            "w": -1.0,
+            "src": "v3",
+            "backbone": "streetclip",
+            "n": 500000,
+            "predictor": "cell_zeroshot"
+          },
+          {
+            "w": 1.0,
+            "src": "v3",
+            "backbone": "clip_l14_336",
+            "n": 500000,
+            "predictor": "cell_zeroshot"
+          }
+        ],
+        "claim": "the gap changes at N=500000: fine-tuned gap - frozen gap != 0"
+      },
+      {
+        "id": "P2/keep/500K",
+        "test": "tost",
+        "terms": [
+          {
+            "w": 1.0,
+            "src": "b",
+            "backbone": "streetclip",
+            "n": 500000,
+            "predictor": "cell_zeroshot"
+          },
+          {
+            "w": -1.0,
+            "src": "b",
+            "backbone": "clip_l14_336",
+            "n": 500000,
+            "predictor": "cell_zeroshot"
+          },
+          {
+            "w": -1.0,
+            "src": "v3",
+            "backbone": "streetclip",
+            "n": 500000,
+            "predictor": "cell_zeroshot"
+          },
+          {
+            "w": 1.0,
+            "src": "v3",
+            "backbone": "clip_l14_336",
+            "n": 500000,
+            "predictor": "cell_zeroshot"
+          }
+        ],
+        "claim": "the gap is kept at N=500000: |fine-tuned gap - frozen gap| < 40"
+      },
+      {
+        "id": "P3/change/50K",
+        "test": "two_sided",
+        "terms": [
+          {
+            "w": 1.0,
+            "src": "b",
+            "backbone": "streetclip",
+            "n": 50000,
+            "predictor": "cell_zeroshot"
+          },
+          {
+            "w": -1.0,
+            "src": "b",
+            "backbone": "clip_l14_336",
+            "n": 50000,
+            "predictor": "cell_zeroshot"
+          },
+          {
+            "w": -1.0,
+            "src": "v3",
+            "backbone": "streetclip",
+            "n": 50000,
+            "predictor": "cell_zeroshot"
+          },
+          {
+            "w": 1.0,
+            "src": "v3",
+            "backbone": "clip_l14_336",
+            "n": 50000,
+            "predictor": "cell_zeroshot"
+          }
+        ],
+        "claim": "the gap changes at N=50000: fine-tuned gap - frozen gap != 0"
+      }
+    ],
+    "secondary": [
+      {
+        "id": "S1/keep/50K",
+        "test": "tost",
+        "terms": [
+          {
+            "w": 1.0,
+            "src": "b",
+            "backbone": "streetclip",
+            "n": 50000,
+            "predictor": "cell_zeroshot"
+          },
+          {
+            "w": -1.0,
+            "src": "b",
+            "backbone": "clip_l14_336",
+            "n": 50000,
+            "predictor": "cell_zeroshot"
+          },
+          {
+            "w": -1.0,
+            "src": "v3",
+            "backbone": "streetclip",
+            "n": 50000,
+            "predictor": "cell_zeroshot"
+          },
+          {
+            "w": 1.0,
+            "src": "v3",
+            "backbone": "clip_l14_336",
+            "n": 50000,
+            "predictor": "cell_zeroshot"
+          }
+        ],
+        "claim": "|fine-tuned gap - frozen gap| < 40 at N=50000. Moved out of the primary family before test because its expected power is about zero; it never yields the label 'kept'"
+      },
+      {
+        "id": "S2/reversed/500K",
+        "test": "below_zero",
+        "terms": [
+          {
+            "w": 1.0,
+            "src": "b",
+            "backbone": "streetclip",
+            "n": 500000,
+            "predictor": "cell_zeroshot"
+          },
+          {
+            "w": -1.0,
+            "src": "b",
+            "backbone": "clip_l14_336",
+            "n": 500000,
+            "predictor": "cell_zeroshot"
+          }
+        ],
+        "claim": "the fine-tuned gap is < 0 at N=500000"
+      },
+      {
+        "id": "S3/reversed/50K",
+        "test": "below_zero",
+        "terms": [
+          {
+            "w": 1.0,
+            "src": "b",
+            "backbone": "streetclip",
+            "n": 50000,
+            "predictor": "cell_zeroshot"
+          },
+          {
+            "w": -1.0,
+            "src": "b",
+            "backbone": "clip_l14_336",
+            "n": 50000,
+            "predictor": "cell_zeroshot"
+          }
+        ],
+        "claim": "the fine-tuned gap is < 0 at N=50000"
+      },
+      {
+        "id": "S4/fine_tuned_gap/50K-500K",
+        "test": "two_sided",
+        "terms": [
+          {
+            "w": 1.0,
+            "src": "b",
+            "backbone": "streetclip",
+            "n": 50000,
+            "predictor": "cell_zeroshot"
+          },
+          {
+            "w": -1.0,
+            "src": "b",
+            "backbone": "clip_l14_336",
+            "n": 50000,
+            "predictor": "cell_zeroshot"
+          },
+          {
+            "w": -1.0,
+            "src": "b",
+            "backbone": "streetclip",
+            "n": 500000,
+            "predictor": "cell_zeroshot"
+          },
+          {
+            "w": 1.0,
+            "src": "b",
+            "backbone": "clip_l14_336",
+            "n": 500000,
+            "predictor": "cell_zeroshot"
+          }
+        ],
+        "claim": "fine-tuned gap(N=50000) - fine-tuned gap(N=500000) != 0"
+      },
+      {
+        "id": "S5/change/50K-500K",
+        "test": "two_sided",
+        "terms": [
+          {
+            "w": 1.0,
+            "src": "b",
+            "backbone": "streetclip",
+            "n": 50000,
+            "predictor": "cell_zeroshot"
+          },
+          {
+            "w": -1.0,
+            "src": "b",
+            "backbone": "clip_l14_336",
+            "n": 50000,
+            "predictor": "cell_zeroshot"
+          },
+          {
+            "w": -1.0,
+            "src": "v3",
+            "backbone": "streetclip",
+            "n": 50000,
+            "predictor": "cell_zeroshot"
+          },
+          {
+            "w": 1.0,
+            "src": "v3",
+            "backbone": "clip_l14_336",
+            "n": 50000,
+            "predictor": "cell_zeroshot"
+          },
+          {
+            "w": -1.0,
+            "src": "b",
+            "backbone": "streetclip",
+            "n": 500000,
+            "predictor": "cell_zeroshot"
+          },
+          {
+            "w": 1.0,
+            "src": "b",
+            "backbone": "clip_l14_336",
+            "n": 500000,
+            "predictor": "cell_zeroshot"
+          },
+          {
+            "w": 1.0,
+            "src": "v3",
+            "backbone": "streetclip",
+            "n": 500000,
+            "predictor": "cell_zeroshot"
+          },
+          {
+            "w": -1.0,
+            "src": "v3",
+            "backbone": "clip_l14_336",
+            "n": 500000,
+            "predictor": "cell_zeroshot"
+          }
+        ],
+        "claim": "the gap change at N=50000 differs from the gap change at N=500000"
+      },
+      {
+        "id": "S6/change/hybrid/50K",
+        "test": "two_sided",
+        "terms": [
+          {
+            "w": 1.0,
+            "src": "b",
+            "backbone": "streetclip",
+            "n": 50000,
+            "predictor": "hybrid_zeroshot"
+          },
+          {
+            "w": -1.0,
+            "src": "b",
+            "backbone": "clip_l14_336",
+            "n": 50000,
+            "predictor": "hybrid_zeroshot"
+          },
+          {
+            "w": -1.0,
+            "src": "v3",
+            "backbone": "streetclip",
+            "n": 50000,
+            "predictor": "hybrid_zeroshot"
+          },
+          {
+            "w": 1.0,
+            "src": "v3",
+            "backbone": "clip_l14_336",
+            "n": 50000,
+            "predictor": "hybrid_zeroshot"
+          }
+        ],
+        "claim": "the gap changes at N=50000 under hybrid_zeroshot, with V3's frozen m and k"
+      }
+    ],
+    "outcomes": {
+      "labels": [
+        "narrowed",
+        "widened",
+        "kept",
+        "reversed",
+        "inconclusive",
+        "narrowed, within the margin",
+        "widened, within the margin",
+        "reversed, within the margin"
+      ],
+      "500K": "P1 significant: narrowed (estimate < 0) or widened (> 0); narrowed becomes reversed if S2 is also significant. P2 significant too: add ', within the margin'. P2 only: kept. Neither: inconclusive.",
+      "50K": "P3 significant: narrowed or widened; narrowed becomes reversed if S3 is also significant. Otherwise inconclusive. 'kept' is not available at 50K."
+    }
+  },
+  "limitations": [
+    "V4 gaps are NOT comparable to V3's H1: H1 is the hybrid_zeroshot gap, the V4 primary predictor is cell_zeroshot (top-1 cell centroid).",
+    "Recipe B was chosen after seeing recipe A's dev results, and its lr search ended at the low edge of the extended grid (grid_edge).",
+    "V3's test values for the frozen comparators exist and are published, so the fine-tuned vs frozen contrasts are not blind on the frozen side.",
+    "The V3 comparators were selected on dev_seen; the V4 lr was selected on dev_unseen.",
+    "The contrast is the adapter update under this augmented schedule; nothing separates the effect of the augmentation.",
+    "N and repetition are confounded: both runs see the same number of images, so 50K sees each image about 10 times and 500K once.",
+    "The CIs cover images and creators, not training seeds. One seed per model; job 6 (seed 43, 50K) is descriptive and never goes to test.",
+    "The hybrid uses V3's m and k, which were selected for the frozen encoder, not re-selected.",
+    "LoRA adapts the last 12 of 24 blocks only."
+  ]
+}

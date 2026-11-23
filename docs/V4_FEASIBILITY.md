@@ -910,6 +910,70 @@ Session 1: jobs 0–2, commit c0aa755 (351 min, exit 0). Session 2: job 3, the e
   rises as the lr falls on both backbones.
 - B-S2: this short-run choice is final for the full runs (jobs 4–6).
 
+**Recipe B full runs, jobs 4 and 5** (2026-11-23, dev only; the test split is still unopened).
+Job 4 (50K, about 10 epochs) ran 568 min and job 5 (500K, seen once) 540 min, both exit 0, commit
+9db076b, lr 3.33e-5, seed 42, 499,968 images seen.
+
+Verified from the downloaded output (`runs/v4_B_session4`, seeded chain):
+- `DONE`, `result.json` and the sha256 of `weights_final.pt` agree in all 4 runs.
+- The frozen head's sha256 equals both the bundle manifest and V3's `head.npy` for that backbone
+  and N. `weights_final.pt` holds 96 LoRA tensors and nothing else.
+- GPU parity holds, and the per-image predictions cover exactly the dev ids and reproduce the
+  stored GeoScores. Jobs 0–3 are unchanged from the earlier sessions.
+
+Regenerate from the repo (needs the local `runs/`):
+`uv run python scripts/analysis/v4_b_verify.py` checks the runs, and
+`uv run python scripts/analysis/v4_b_dev_table.py` prints every table and interval below.
+
+| dev GeoScore (top-1 cell centroid) | StreetCLIP dev_unseen | L/14-336 dev_unseen | StreetCLIP dev_seen | L/14-336 dev_seen |
+|---|---|---|---|---|
+| V3 frozen, bal 50K | 3372 [3231, 3586] | 3215 [2853, 3466] | 3586 [3565, 3607] | 3447 [3425, 3469] |
+| **B, job 4: 50K** | **3197** [3027, 3416] | **3046** [2690, 3326] | **3500** [3478, 3522] | **3291** [3267, 3315] |
+| B − V3, 50K | −174 [−265, −128] | −170 [−205, −105] | −86 [−113, −60] | −156 [−214, −97] |
+| V3 frozen, bal 500K | 3638 [3479, 3848] | 3582 [3433, 3798] | 4094 [4076, 4111] | 4044 [4026, 4062] |
+| **B, job 5: 500K** | **3618** [3466, 3850] | **3591** [3442, 3805] | **4117** [4099, 4135] | **4064** [4046, 4082] |
+| B − V3, 500K | −20 [−44, 22] | +9 [−23, 37] | +24 [8, 40] | +20 [4, 36] |
+
+| StreetCLIP − L/14-336 gap | dev_unseen | dev_seen |
+|---|---|---|
+| V3 frozen, 50K | +156 [12, 484] | +139 [103, 178] |
+| B, 50K | +151 [43, 390] | +209 [135, 285] |
+| **Δ = B gap − frozen gap, 50K** | **−5** [−101, 47] | **+70** [20, 124] |
+| V3 frozen, 500K | +56 [15, 79] | +50 [33, 65] |
+| B, 500K | +27 [9, 60] | +53 [40, 66] |
+| **Δ = B gap − frozen gap, 500K** | **−28** [−48, 12] | **+3** [−12, 20] |
+| Δ(50K) − Δ(500K) | +24 [−88, 89] | +67 [42, 92] (sequence clusters) |
+
+- Brackets are 95% paired cluster-bootstrap CIs, 10,000 resamples, seed 42, so V3's brackets differ
+  by a few points from the 1,000-resample rows above. dev_unseen clusters by creator (408).
+- dev_seen has one image per sequence, so V3's sequence clusters do not cluster it at all. Its
+  **B − V3, gap and Δ rows use creator clusters** (3,413 creators), which are wider. Its score rows
+  and the last row keep the sequence clusters.
+- **Fine-tuning lowered GeoScore at 50K** on both backbones and both splits. At 500K it is within
+  noise on dev_unseen and slightly above frozen on dev_seen.
+- **The gap change at 50K depends on the split:** about zero on dev_unseen, wider on dev_seen.
+  dev_unseen is the selection split, and its interval is too wide to exclude either reading.
+- **Against the ±40 margin (descriptive, dev):** the 90% CI of Δ is inside ±40 only at 500K on
+  dev_seen ([−10, 17]). It is not at 50K (dev_unseen [−88, 42], dev_seen [26, 114]) or at 500K on
+  dev_unseen ([−45, 7]).
+- **Declared diagnostic, (B − V3) on dev_seen minus dev_unseen** (independent creator bootstraps):
+  StreetCLIP +88 [32, 183] at 50K and +43 [−2, 73] at 500K; L/14-336 +14 [−68, 83] at 50K and +12
+  [−22, 46] at 500K.
+- N and repetition are confounded by design: both runs see the same number of images, so 50K sees
+  each image about 10 times and 500K once.
+
+Job 4's per-epoch diagnostic (the same 2K dev_unseen images each time; **diagnostic only**, never
+used for selection, stopping or checkpoint choice; 154 creators, no per-epoch CI computed):
+
+| epoch | V3 frozen | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | final |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| StreetCLIP | 3339 | 3209 | 3163 | 3187 | 3205 | 3190 | 3189 | 3181 | 3167 | 3164 | 3169 |
+| L/14-336 | 3205 | 3048 | 3029 | 3036 | 3019 | 3035 | 3027 | 3047 | 3032 | 3041 | 3041 |
+| gap | +134 | +161 | +134 | +151 | +186 | +155 | +162 | +134 | +134 | +122 | +128 |
+
+Both backbones are already about 130–160 below frozen after the first epoch and stay flat after
+that.
+
 **The control (A's job 7) under B: dropped, not replaced.**
 - A's control trained the head on the frozen encoder with the same augmented schedule. Its
   purpose was to separate encoder adaptation from "augmentation plus more head training".
@@ -965,6 +1029,78 @@ option totals still add the spent 1.5 h pilot, which the table below leaves out)
   - Nothing else is cut without a new decision. The next candidate is moving the test pass into a
     third week, not shrinking N.
 - The 500K arm and the test pass are never cut silently.
+
+## 5d. V4 test pre-registration (recipe B; written 2026-11-23, after dev, before any V4 test image)
+
+**Files.** `configs/v4_test_prereg.json` (the machine-readable freeze), sha256
+`e0fcbaf9397998b18767559a284e527f1043f7c31ea5097efbcd5262f21449cd`, and
+`src/geoguessr_ai/v4_test.py` (the test stage). They must be committed **together**. This section
+was written after the dev results of 5c, so every choice below may depend on them, except the
+margin of 40, which was fixed on 2026-11-18.
+
+**Frozen.**
+- **Models:** the four seed-42 runs of jobs 4 and 5 (StreetCLIP and L/14-336 at 50K and 500K), by
+  weights, head and dev-prediction sha256, trained at commit 9db076b.
+- **Primary predictor:** `cell_zeroshot` (top-1 cell centroid) at both N.
+- **Comparators:** V3's frozen `cell_zeroshot` test hits of the same backbone and N. They must
+  reproduce V3's committed `results/v3/test_results.csv`, frozen by its git object id.
+- **Statistic:** the paired creator-cluster bootstrap, 10,000 resamples, seed 42, α = 0.05.
+  Sequence clusters are a sensitivity column and decide nothing.
+
+**Primary family (Holm over 3 tests), Δ = fine-tuned gap − frozen gap:**
+
+| id | test |
+|---|---|
+| P1 | 500K: Δ ≠ 0 (two-sided) |
+| P2 | 500K: \|Δ\| < 40 (TOST) |
+| P3 | 50K: Δ ≠ 0 (two-sided) |
+
+**Secondary family (its own Holm over 6 tests; never changes a primary verdict):**
+- S1: 50K TOST. It is outside the primary family because its estimated power is about zero: dev_seen
+  noise scaled to test's creator count gives σ ≈ 21 at 50K, against the 10.9 assumed in section 5.
+  This replaces section 5's assumption of four Holm tests.
+- S2, S3: reversal, the fine-tuned gap < 0, at 500K and 50K.
+- S4: fine-tuned gap(50K) − fine-tuned gap(500K).
+- S5: Δ(50K) − Δ(500K).
+- S6: Δ at 50K under `hybrid_zeroshot`, with V3's frozen m and k (not re-selected).
+
+**Outcome labels.**
+- **500K:** P1 significant gives *narrowed* (Δ < 0) or *widened* (Δ > 0). *Narrowed* becomes
+  *reversed* if S2 is also significant. If P2 is significant too, add ", within the margin". P2
+  alone gives *kept*. Neither gives *inconclusive*.
+- **50K:** P3 significant gives *narrowed* or *widened*, and *narrowed* becomes *reversed* if S3 is
+  also significant. Otherwise *inconclusive*. *Kept* is not available at 50K, whatever S1 shows.
+
+**Declared limitations** (all in the config):
+- **V4 gaps are not comparable to V3's H1.** H1 is the `hybrid_zeroshot` gap; V4's primary predictor
+  is `cell_zeroshot`.
+- Recipe B was chosen after seeing recipe A's dev results, and its lr is at the low grid edge.
+- V3's frozen test values are already published, so the contrasts are not blind on the frozen side.
+- V3's comparators were selected on dev_seen, V4's lr on dev_unseen.
+- The augmentation's effect is not separated from the adapter update.
+- N and repetition are confounded (50K sees each image about 10 times, 500K once).
+- The CIs do not cover training seeds. Job 6 is descriptive and never goes to test.
+- The hybrid's m and k were selected for the frozen encoder.
+- LoRA adapts only the last 12 of 24 blocks.
+
+**What the stage refuses** (before reading any V4 test image):
+- a pre-registration that is uncommitted, modified, or not the sha256 given on the command line;
+- modified tracked files, or a `v4_test.py` changed since the pre-registration commit;
+- a job 6 that is unfinished, is not the declared seed-43 run at commit 9db076b, or **finished before
+  the pre-registration was committed**;
+- V3 comparators that do not reproduce V3's committed table;
+- other weights, heads, config, bundle or partition;
+- a model whose top-1 cell differs from its stored dev prediction on more than 1% of the 2K dev_unseen
+  check images.
+
+**Order.** Commit both files before job 6 finishes (Saturday 2026-11-28), run job 6 at commit
+9db076b, and only then run `test` for jobs 4 and 5, `hybrid` for job 4, and `analyze`. The Kaggle
+notebook for the test session is not written yet.
+
+**Runtime settings stay outside the frozen file.** Paths, `--device`, `--batch`, `--workers` and
+`--knn-chunk` are command-line arguments, so a Kaggle path or out-of-memory fix belongs in the
+notebook. Device, batch and workers are recorded in `dev_check.json` and `test_row.json`. The kNN
+stays on NumPy/CPU at fp32, because that is V3's frozen numerical setting.
 
 ## 6. Open risks
 
